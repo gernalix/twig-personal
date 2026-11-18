@@ -97,8 +97,9 @@ including local aliases and external-storage SAF documents). Missing apps retain
 
 **Network video thumbnails** (★ see [docs/lessons/thumbnails.md](../lessons/thumbnails.md) for the full saga): instead of
 downloading the whole file, Twig parses the container itself to locate the keyframe at
-1/10 of the duration and downloads only ~2 MB. MP4 parses the moov sample tables
-(`findKeyframeOffset`); MKV parses EBML (SeekHead → Cues → target Cluster).
+1/10 of the duration. MP4 parses the moov sample tables (`findKeyframeOffset`) and prefetches
+up to 1 MiB around an exact keyframe offset. The decoder can fetch more through the
+positional read cache for large frames. MKV parses EBML (SeekHead → Cues → target Cluster).
 All four network backends (SMB/WebDAV/SFTP/FTP) implement an efficient `openRandom`
 (`FileSystem.randomAccessEfficient() == true`), which player seeking benefits from too.
 

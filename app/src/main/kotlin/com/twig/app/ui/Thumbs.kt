@@ -204,8 +204,15 @@ object Thumbs {
         runCatching { blacklistFile(ctx).appendText("$key\n") }
     }
 
-    private fun recentlyFailed(ctx: Context, key: String): Boolean {
-        if (loadBlacklist(ctx).contains(key)) return true
+    // Retry MP4s suppressed by the older network decoder while keeping successful
+    // thumbnails and all other entries in their existing caches.
+    private fun blacklistKey(file: XFile, key: String): String =
+        if (file.scheme !in setOf("file", "saf", "trash") &&
+            file.extension in setOf("mp4", "m4v", "mov")
+        ) "mp4-v2:$key" else key
+
+    private fun recentlyFailed(ctx: Context, file: XFile, key: String): Boolean {
+        if (loadBlacklist(ctx).contains(blacklistKey(file, key))) return true
         val at = failed[key] ?: return false
         return System.currentTimeMillis() - at < FAIL_COOLDOWN_MS
     }
@@ -361,7 +368,7 @@ object Thumbs {
         val ctx = view.context.applicationContext
         applyKnownShape(view, key, growPx)
         mem.get(key)?.let { fill(view, it, key); return }
-        if (recentlyFailed(ctx, key)) return
+        if (recentlyFailed(ctx, file, key)) return
         if (!eligible(ctx, file)) { failed[key] = System.currentTimeMillis(); return }
         view.tag = key
         waiters[key]?.let { it.add(view); return }
@@ -377,7 +384,7 @@ object Thumbs {
                 failed[key] = System.currentTimeMillis()
                 val count = (failCount[key] ?: 0) + 1
                 failCount[key] = count
-                if (count >= BLACKLIST_THRESHOLD) addToBlacklist(ctx, key)
+                if (count >= BLACKLIST_THRESHOLD) addToBlacklist(ctx, blacklistKey(file, key))
             } else {
                 failed.remove(key)
                 failCount.remove(key)
@@ -426,7 +433,7 @@ object Thumbs {
         failed.remove(key)
         failCount.remove(key)
         val set = loadBlacklist(ctx)
-        if (set.remove(key)) {
+        if (set.remove(blacklistKey(file, key))) {
             runCatching {
                 blacklistFile(ctx).writeText(set.joinToString("") { "$it\n" })
             }
@@ -687,7 +694,9 @@ object Thumbs {
 
     /** Safety margin before/after the keyframe byte offset precisely computed by [findKeyframeOffset] — just enough for the decoder to grab SPS/PPS or probe slightly further back, no need for a big margin like the ratio-estimate fallback. */
     private const val VIDEO_KEYFRAME_MARGIN = 128L * 1024
-    private const val VIDEO_KEYFRAME_WINDOW = 8L * 1024 * 1024 // 4K/60fps I-frames can reach several MB; give a bigger window to avoid the fallback read.
+    // After an exact seek, prefetch just the nearby data. Larger frames can use
+    // NetVideoDataSource's cached reads without making every SFTP request pay for them.
+    private const val VIDEO_KEYFRAME_WINDOW = 1L * 1024 * 1024
 
     /** [findKeyframeOffset] parse-failure fallback: estimate the offset by mdat size ratio, leave a half-window margin on each side to absorb uneven bitrate (empirically this error can reach 9 MB+, the fallback itself
      * is unreliable — just a last resort when there's nothing better). */
@@ -1287,6 +1296,8 @@ object Thumbs {
         // ([findKeyframeOffset]) precisely locates the target time's keyframe byte
         // offset, and we only download that small slice.
         var frame: Bitmap? = null
+        val started = SystemClock.elapsedRealtime()
+        var prefetched = 0
         run {
             val boxes = scanTopBoxes(src, size)
             val moov = boxes["moov"]
@@ -1359,12 +1370,15 @@ object Thumbs {
                     winStart = maxOf(mdat.first, targetByte - VIDEO_MID_WINDOW / 2)
                     winLen = minOf(VIDEO_MID_WINDOW, mdat.first + mdat.second - winStart)
                 } else return@pickRepresentativeFrame
-                ds.pin(winStart, readAtCapped(src, winStart, winLen))
+                val window = readAtCapped(src, winStart, winLen)
+                prefetched = window.size
+                ds.pin(winStart, window)
             }
             Log.d(
                 "twig",
                 "thumbs: mp4 ${file.name} size=$size head=${head.size} moov=$moov " +
-                    "durationMs=$durationMs frame=${frame != null} ${ds.stats()}",
+                    "durationMs=$durationMs frame=${frame != null} prefetchKiB=${prefetched / 1024} " +
+                    "ms=${SystemClock.elapsedRealtime() - started} ${ds.stats()}",
             )
         }
         return frame
