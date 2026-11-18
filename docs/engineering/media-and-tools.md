@@ -19,6 +19,10 @@ Music inside mounted restic repositories and archives uses an in-memory queue
 These tracks cannot be favorited, saved into playlists or exported; player exit
 clears the queue. Resolve them through the live filesystem, without reopening a
 repository or archive from a persisted descriptor.
+For a video opened from an ordinary file pane, Previous and Next use the visible videos
+from its directory in the pane's current order, including per-directory sort settings.
+Server-managed episode queues still use server order. Episode auto-play, intro/outro
+marks and shared playback choices apply when the queue follows the series order.
 Continue Watching (`PlaybackStore`) retains a `pendingNext` destination after confirmed
 local/file-backend episode completion, including automatic ending skips. This is a zero-position
 destination, never watched progress: quick exits, buffering and failures leave it intact;

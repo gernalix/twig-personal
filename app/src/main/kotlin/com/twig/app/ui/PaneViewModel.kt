@@ -1149,6 +1149,10 @@ class PaneViewModel(app: Application) : AndroidViewModel(app) {
         return audios to idx
     }
 
+    /** Match the videos and ordering the user sees in the containing directory. */
+    fun videoSiblings(file: XFile): List<XFile> =
+        com.twig.app.Episodes.directoryQueueOf(file, visible(children[siblingsKey(file)]))
+
     /** Persistent locations keep their identity; mounted archives/restic get session-only tracks. */
     fun trackFrom(file: XFile): com.twig.app.PlaylistTrack? = when {
         file.scheme == "file" ->

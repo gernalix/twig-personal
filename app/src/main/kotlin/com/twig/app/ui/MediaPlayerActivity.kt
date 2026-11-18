@@ -39,6 +39,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -131,7 +133,12 @@ class MediaPlayerActivity : TwigActivity(), SurfaceHolder.Callback {
      */
     private var remote: RemoteProgress? = null
 
-    /** Series queue (episodes of the same show, in order); empty when not computable, in which case the two buttons are not shown. */
+    /** Ordered videos for the player's Previous and Next controls. */
+    class DirectoryPlayback : ViewModel() {
+        var videos: List<XFile>? = null
+    }
+
+    private var directoryNavigation = false
     private var queue: List<XFile> = emptyList()
     private var queueIndex = -1
     private var skipMarks = EpisodeSkip()
@@ -260,6 +267,11 @@ class MediaPlayerActivity : TwigActivity(), SurfaceHolder.Callback {
         // also loses its extension (container recognition degrades to sniff order)
         file = XFile(scheme, path, isDir = false, size = size, displayName = name)
         isVideo = intent.getBooleanExtra(EXTRA_AS_VIDEO, false) || OpenFiles.isVideo(file)
+        val directoryToken = intent.getStringExtra(EXTRA_DIRECTORY_TOKEN)
+        pendingDirectory?.takeIf { it.first == directoryToken }?.let { (_, videos) ->
+            ViewModelProvider(this)[DirectoryPlayback::class.java].videos = videos
+            pendingDirectory = null
+        }
 
         b.toolbar.title = name
         b.toolbar.setNavigationOnClickListener { finish() }
@@ -356,8 +368,18 @@ class MediaPlayerActivity : TwigActivity(), SurfaceHolder.Callback {
 
     private fun beginVideo() {
         listOf(b.btnPlay, b.btnSubtitle, b.btnAudioTrack, b.btnScale).forEach { it.isEnabled = true }
+        val paneVideos = ViewModelProvider(this)[DirectoryPlayback::class.java].videos
+            ?.takeUnless { runCatching { FsRegistry.of(file) }.getOrNull() is com.twig.core.EpisodeSeries }
+        if (!paneVideos.isNullOrEmpty()) {
+            queue = paneVideos
+            queueIndex = queue.indexOfFirst { it.scheme == file.scheme && it.path == file.path }
+            directoryNavigation = queue.size > 1 && queue != com.twig.app.Episodes.queueOf(file, queue)
+            syncQueueButtons()
+        } else {
+            loadQueue()
+        }
         loadMemo()
-        loadQueue()
+        loadSkipMarks()
         // Progress owned by the backend must be loaded before the first frame.
         remote = RemoteProgress.of(this, file)
         if (intent.getBooleanExtra(EXTRA_FROM_START, false)) {
@@ -499,7 +521,7 @@ class MediaPlayerActivity : TwigActivity(), SurfaceHolder.Callback {
                         android.util.Log.d("twig", "player: ended pos=${p.currentPosition} dur=${p.duration}")
                         b.btnPlay.setImageResource(R.drawable.ic_play)
                         if (remote == null) saveProgress()
-                        if (com.twig.app.Prefs.autoNextEpisode(this@MediaPlayerActivity) &&
+                        if (!directoryNavigation && com.twig.app.Prefs.autoNextEpisode(this@MediaPlayerActivity) &&
                             queueIndex in 0 until queue.size - 1
                         ) {
                             playAt(queueIndex + 1)
@@ -1185,12 +1207,14 @@ class MediaPlayerActivity : TwigActivity(), SurfaceHolder.Callback {
      * falling back to the queue the series key would be lost the moment the user pressed "next",
      * which is precisely the case the whole feature exists for.
      */
-    private fun seriesKeyFor(f: XFile): String? =
-        com.twig.app.Episodes.parse(f.name)?.let {
+    private fun seriesKeyFor(f: XFile): String? {
+        if (directoryNavigation) return null
+        return com.twig.app.Episodes.parse(f.name)?.let {
             // Number-only files have no show prefix; scope their choices to the directory.
             "${f.scheme}|${if (it.prefix.isEmpty()) "@${f.parentPath}" else it.prefix}"
         }
             ?: queue.firstOrNull()?.let { "${it.scheme}|${it.path}" }
+    }
 
     private fun memoKeys() = MediaPrefStore.fileKey(file) to seriesKey?.let { MediaPrefStore.seriesKey(it) }
 
@@ -1794,8 +1818,8 @@ class MediaPlayerActivity : TwigActivity(), SurfaceHolder.Callback {
         val has = queueIndex >= 0 && queue.size > 1
         b.btnPrev.visibility = if (has && queueIndex > 0) View.VISIBLE else View.INVISIBLE
         b.btnNext.visibility = if (has && queueIndex < queue.size - 1) View.VISIBLE else View.INVISIBLE
-        b.btnSkipHead.visibility = if (has) View.VISIBLE else View.GONE
-        b.btnSkipTail.visibility = if (has) View.VISIBLE else View.GONE
+        b.btnSkipHead.visibility = if (has && !directoryNavigation) View.VISIBLE else View.GONE
+        b.btnSkipTail.visibility = b.btnSkipHead.visibility
         b.controls.post { arrangePlaybackButtons() }
     }
 
@@ -1821,7 +1845,7 @@ class MediaPlayerActivity : TwigActivity(), SurfaceHolder.Callback {
     }
 
     private fun skipScope(): String? {
-        if (queue.size < 2 || queueIndex < 0) return null
+        if (directoryNavigation || queue.size < 2 || queueIndex < 0) return null
         return seriesKeyFor(file)?.let { MediaPrefStore.seriesKey(it) }
     }
 
@@ -2079,7 +2103,7 @@ class MediaPlayerActivity : TwigActivity(), SurfaceHolder.Callback {
             if (skippedEnding || p.playbackState == Player.STATE_ENDED) {
                 episodeCompleted = true
                 PlaybackStore.completeEpisode(this, file,
-                    if (queueIndex >= 0) queue.getOrNull(queueIndex + 1) else null)
+                    if (!directoryNavigation && queueIndex >= 0) queue.getOrNull(queueIndex + 1) else null)
             } else {
                 PlaybackStore.save(this, file, position, dur)
             }
@@ -2159,13 +2183,29 @@ class MediaPlayerActivity : TwigActivity(), SurfaceHolder.Callback {
         private const val EXTRA_AS_VIDEO = "asVideo"
         private const val EXTRA_FROM_START = "fromStart"
         private const val EXTRA_HISTORY_CONNECTION = "historyConnection"
+        private const val EXTRA_DIRECTORY_TOKEN = "directoryToken"
+
+        // Like the image viewer, keep large directory snapshots out of Android's Intent payload.
+        private var pendingDirectory: Pair<String, List<XFile>>? = null
 
         /** [asVideo]: the user chose "View as video" — treat the file as video whatever its
          * extension says. An extension no extractor claims leaves the container to sniffing,
          * which is what such a file needs anyway; and there is no episode queue: its siblings are judged
          * by extension, so the file is not among them. */
-        fun start(context: Context, file: XFile, asVideo: Boolean = false, fromStart: Boolean = false) {
-            context.startActivity(playerIntent(context, file, asVideo, fromStart))
+        fun start(
+            context: Context,
+            file: XFile,
+            asVideo: Boolean = false,
+            fromStart: Boolean = false,
+            directoryVideos: List<XFile> = emptyList(),
+        ) {
+            val launch = playerIntent(context, file, asVideo, fromStart)
+            if (directoryVideos.isNotEmpty()) {
+                val token = java.util.UUID.randomUUID().toString()
+                pendingDirectory = token to directoryVideos
+                launch.putExtra(EXTRA_DIRECTORY_TOKEN, token)
+            }
+            context.startActivity(launch)
         }
 
         /** Start immediately; the activity resolves the connection and real metadata behind its spinner. */

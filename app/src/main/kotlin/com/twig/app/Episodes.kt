@@ -77,6 +77,13 @@ object Episodes {
         return null
     }
 
+
+    /** Keep the order of the visible directory entries supplied by the pane. */
+    fun directoryQueueOf(current: XFile, entries: List<XFile>): List<XFile> {
+        val videos = entries.filter { it.scheme == current.scheme && !it.isDir && OpenFiles.isVideo(it) }
+        return videos.takeIf { it.any { video -> video.path == current.path } }.orEmpty()
+    }
+
     /** Normalise the prefix: lowercase + trim leading/trailing separators, so `Show.` and `Show ` collapse into the same group. */
     private fun norm(s: String) = s.lowercase().trim(' ', '.', '_', '-', '[', '(')
 

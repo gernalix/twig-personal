@@ -736,7 +736,7 @@ class PaneFragment : Fragment() {
             OpenFiles.isAudio(file) -> openAudio(file)
             OpenFiles.isPlaylist(file) -> openM3u(file)
             OpenFiles.isVideo(file) ->
-                MediaPlayerActivity.start(requireContext(), file)
+                MediaPlayerActivity.start(requireContext(), file, directoryVideos = viewModel.videoSiblings(file))
             // No built-in viewer: pop the system resolver directly (with "Just once / Always"); if nothing can open it, fall back to the open-with dialog.
             else -> if (!OpenFiles.openWith(requireContext(), file)) chooseOpen(file)
         }

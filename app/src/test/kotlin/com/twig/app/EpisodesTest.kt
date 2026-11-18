@@ -113,6 +113,31 @@ class EpisodesTest {
     }
 
     @Test
+    fun `folder queue follows file size and reversed date order`() {
+        val alfa = f("Alfa.mp4").copy(size = 2, lastModified = 10)
+        val bravo = f("Bravo.mkv").copy(size = 1, lastModified = 30)
+        val charlie = f("Charlie.mp4").copy(size = 3, lastModified = 20)
+        val entries = listOf(alfa, bravo, charlie, f("notes.txt"))
+
+        val sizeOrder = SortSpec(by = FileSortKey.SIZE).sort(entries)
+        val dateOrder = SortSpec(by = FileSortKey.DATE, reversed = true).sort(entries)
+        assertEquals(listOf(bravo, alfa, charlie), Episodes.directoryQueueOf(alfa, sizeOrder))
+        assertEquals(listOf(bravo, charlie, alfa), Episodes.directoryQueueOf(alfa, dateOrder))
+    }
+
+    @Test
+    fun `folder queue preserves pane order even for numbered episodes`() {
+        val clips = listOf(f("Show.S01E02.mp4"), f("unrelated.mp4"), f("Show.S01E01.mp4"))
+        assertEquals(clips, Episodes.directoryQueueOf(clips[0], clips))
+    }
+
+    @Test
+    fun `folder queue is empty if current video is absent`() {
+        val clips = listOf(f("a.mp4"), f("b.mp4"))
+        assertEquals(emptyList<XFile>(), Episodes.directoryQueueOf(f("missing.mp4"), clips))
+    }
+
+    @Test
     fun `another show never leaks into the queue`() {
         val files = listOf(f("Show.S01E01.mkv"), f("Show.S01E02.mkv"), f("Other.S01E01.mkv"))
         val q = Episodes.queueOf(files[0], files)
