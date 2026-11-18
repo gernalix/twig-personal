@@ -130,6 +130,7 @@ android {
     }
 
     buildTypes {
+        getByName("debug") { applicationIdSuffix = ".personal" }
         release {
             isMinifyEnabled = true          // R8 code obfuscation / shrinking
             isShrinkResources = true        // resource shrinking
