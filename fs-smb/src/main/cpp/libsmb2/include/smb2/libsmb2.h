@@ -580,7 +580,7 @@ const char *smb2_get_server_guid(struct smb2_context *smb2);
  * a session key.
  */
 int smb2_get_application_key(struct smb2_context *smb2, uint8_t key[16]);
-        
+
 /*
  * Asynchronous call to connect a TCP connection to the server
  *
