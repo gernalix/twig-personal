@@ -1,0 +1,1 @@
+# Verified minimum versions for resolvable application and test classpaths.
