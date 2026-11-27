@@ -719,7 +719,8 @@ class TerminalActivity : TwigActivity() {
                 // The view hasn't measured a size yet (updateSize just returns); kick it off once.
                 val cols = (b.terminal.mEmulator?.mColumns ?: 80).coerceIn(20, 500)
                 val rows = (b.terminal.mEmulator?.mRows ?: 24).coerceIn(6, 300)
-                runCatching { s.initializeEmulator(cols, rows) }
+                val renderer = b.terminal.mRenderer
+                runCatching { s.initializeEmulator(cols, rows, renderer.fontWidth.toInt(), renderer.fontLineSpacing) }
                     .onFailure { Log.e(TAG, "local shell", it) }
                 b.terminal.attachSession(s)
             }
@@ -872,7 +873,7 @@ class TerminalActivity : TwigActivity() {
         val s = TerminalSession("/system/bin/sh", "/", arrayOf(), arrayOf(), 5000, sessionClient)
         val output = SshOutput()
         output.onTitle = { t.noteTitle(it) }
-        val emulator = TerminalEmulator(output, 80, 24, 5000, sessionClient)
+        val emulator = newBridgedEmulator(output)
         TerminalSession::class.java.getDeclaredField("mEmulator")
             .apply { isAccessible = true }.set(s, emulator)
         // write() only enqueues when mShellPid>0
@@ -971,7 +972,7 @@ class TerminalActivity : TwigActivity() {
         val s = TerminalSession("/system/bin/sh", "/", arrayOf(), arrayOf(), 5000, sessionClient)
         val output = SshOutput()
         output.onTitle = { t.noteTitle(it) }
-        val emulator = TerminalEmulator(output, 80, 24, 5000, sessionClient)
+        val emulator = newBridgedEmulator(output)
         TerminalSession::class.java.getDeclaredField("mEmulator")
             .apply { isAccessible = true }.set(s, emulator)
         TerminalSession::class.java.getDeclaredField("mShellPid")
@@ -1586,6 +1587,11 @@ class TerminalActivity : TwigActivity() {
 
     private val TerminalSession.emulator: TerminalEmulator?
         get() = runCatching { getEmulator() }.getOrNull()
+
+    private fun newBridgedEmulator(output: TerminalOutput): TerminalEmulator {
+        val renderer = b.terminal.mRenderer
+        return TerminalEmulator(output, 80, 24, renderer.fontWidth.toInt(), renderer.fontLineSpacing, 5000, sessionClient)
+    }
 
     /** The emulator's write-back channel (terminal replies like cursor-position queries); delivered to the input queue via `redirect`. */
     private class SshOutput : TerminalOutput() {

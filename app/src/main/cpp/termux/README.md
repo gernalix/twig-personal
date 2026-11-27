@@ -2,7 +2,7 @@
 
 `termux.c` is an **unmodified upstream copy** of
 
-    termux-app / terminal-emulator/src/main/jni/termux.c   at tag v0.118.0
+    termux-app / terminal-emulator/src/main/jni/termux.c   at tag v0.118.3
     https://github.com/termux/termux-app
 
 which is the exact version of the `terminal-emulator` artifact this app depends
@@ -31,12 +31,11 @@ unavailable.
 ## Keeping it in step
 
 The Java side still comes from the AAR, so **this file must match the version in
-`gradle/libs.versions.toml`**. If the Termux dependency is bumped, re-copy
-`termux.c` from the matching tag and check that `JNI.class` still declares the
-same native methods:
+`app/build.gradle.kts`**. If the Termux dependency is bumped, re-copy
+`termux.c` from the matching tag. Generate a JNI header from the native method
+declarations in the new artifact and check that its prototypes match the C
+definitions. Check the actual ELF alignment in each packaged APK.
 
-    javap -p com/termux/terminal/JNI.class
-
-Drop this directory and the `termux` target in `../CMakeLists.txt` once upstream
-ships a 16 KB-aligned build; the AAR's own `.so` is excluded in
-`app/build.gradle.kts` and that exclusion has to go at the same time.
+Drop this directory, the `termux` target in `../CMakeLists.txt` and the
+`libtermux.so` pick-first rule in `app/build.gradle.kts` once the AAR ships a
+16 KB-aligned build.

@@ -30,7 +30,7 @@ class TermSelectionTest {
             override fun onBell() = Unit
             override fun onColorsChanged() = Unit
         }
-        view.mEmulator = TerminalEmulator(output, 80, 24, 100, client)
+        view.mEmulator = TerminalEmulator(output, 80, 24, 8, 16, 100, client)
         val bytes = "ignored\r\nabc first second".toByteArray()
         view.mEmulator.append(bytes, bytes.size)
         val selection = view.getTextSelectionCursorController()

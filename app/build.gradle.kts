@@ -263,8 +263,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     // SSH terminal: Termux terminal emulator + render view (GPLv3, in-tree)
-    implementation("com.github.termux.termux-app:terminal-view:v0.118.0")
-    implementation("com.github.termux.termux-app:terminal-emulator:v0.118.0")
+    implementation("com.github.termux.termux-app:terminal-view:v0.118.3")
+    implementation("com.github.termux.termux-app:terminal-emulator:v0.118.3")
 
     // Media playback: ExoPlayer (own demuxer, full MKV/MP4) + ffmpeg audio software decode (AC3/EAC3/DTS/TrueHD, etc.)
     implementation(libs.androidx.media3.exoplayer)
