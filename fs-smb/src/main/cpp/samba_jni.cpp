@@ -8,8 +8,7 @@ extern "C" {
 #include "libsmb2/include/smb2/smb2.h"
 #include "libsmb2/include/smb2/libsmb2.h"
 #include "libsmb2/include/smb2/libsmb2-raw.h"
-#include "libsmb2/include/smb2/libsmb2-dcerpc.h"
-#include "libsmb2/include/smb2/libsmb2-dcerpc-srvsvc.h"
+#include "libsmb2/include/smb2/libsmb2-share-enum.h"
 }
 
 #include <fcntl.h>
@@ -315,36 +314,23 @@ Java_com_twig_fs_smb_NativeSmbClient_nativeListShares(
     if (!handle) return nullptr;
     auto* ctx = reinterpret_cast<smb2_context*>(handle);
 
-    struct srvsvc_NetrShareEnum_rep* rep = smb2_share_enum_sync(ctx, SHARE_INFO_1);
+    auto* rep = smb2_share_enum_sync(ctx, SMB2_SHARE_INFO_1);
     if (!rep) {
         LOGE("smb2_share_enum_sync failed: %s", smb2_get_error(ctx));
         return nullptr;
     }
-    if (rep->status != 0) {
-        LOGE("NetrShareEnum status 0x%08x", rep->status);
-        smb2_free_data(ctx, rep);
-        return nullptr;
-    }
-
-    struct srvsvc_SHARE_INFO_1_CONTAINER* ctr = &rep->ses.ShareInfo.Level1;
-    uint32_t count = 0;
-    if (ctr->Buffer) {
-        // EntriesRead is what the server claims; max_count is what the decoder really
-        // allocated. Trusting the former alone would walk off the end of a short reply.
-        count = ctr->EntriesRead < ctr->Buffer->max_count ? ctr->EntriesRead
-                                                          : ctr->Buffer->max_count;
-        if (!ctr->Buffer->share_info_1) count = 0;
-    }
+    const auto* shares = rep->share_info.info_1;
+    const uint32_t count = shares ? rep->entries_read : 0;
 
     jclass strClass = env->FindClass("java/lang/String");
     jobjectArray result = env->NewObjectArray((jsize) count, strClass, nullptr);
 
     for (uint32_t i = 0; i < count; i++) {
-        struct srvsvc_SHARE_INFO_1* si = &ctr->Buffer->share_info_1[i];
-        std::string s(si->netname.utf8 ? si->netname.utf8 : "");
+        const auto& share = shares[i];
+        std::string s(share.netname ? share.netname : "");
         s += '\t';
         char numbuf[32];
-        snprintf(numbuf, sizeof(numbuf), "%u", (unsigned) si->type);
+        snprintf(numbuf, sizeof(numbuf), "%u", (unsigned) share.type);
         s += numbuf;
 
         jstring jEntry = env->NewStringUTF(s.c_str());

@@ -9,11 +9,26 @@
 /* Define to 1 if you have the <fcntl.h> header file. */
 #cmakedefine HAVE_FCNTL_H "@HAVE_FCNTL_H@"
 
+/* Define to 1 if you have the <CommonCrypto/CommonCryptor.h> header file. */
+#cmakedefine HAVE_COMMONCRYPTO_COMMONCRYPTOR_H "@HAVE_COMMONCRYPTO_COMMONCRYPTOR_H@"
+
 /* Define to 1 if you have the <sys/fcntl.h> header file. */
 #cmakedefine HAVE_SYS_FCNTL_H "@HAVE_SYS_FCNTL_H@"
 
 /* Define to 1 if you have the <gssapi/gssapi.h> header file. */
 #cmakedefine HAVE_GSSAPI_GSSAPI_H "@HAVE_GSSAPI_GSSAPI_H@"
+
+/* Define to 1 if you have the <GSS/GSS.h> header file. */
+#cmakedefine HAVE_GSS_GSS_H "@HAVE_GSS_GSS_H@"
+
+/* Whether we have libquic for SMB2 over QUIC */
+#cmakedefine HAVE_LIBQUIC 1
+
+/* Whether we have librdmacm for SMB Direct */
+#cmakedefine HAVE_LIBRDMACM 1
+
+/* Whether we use OpenSSL's libcrypto */
+#cmakedefine HAVE_OPENSSL 1
 
 /* Whether we use gssapi_krb5 or not */
 #cmakedefine HAVE_LIBKRB5 "@HAVE_LIBKRB5@"
@@ -38,6 +53,8 @@
 
 /* Whether we have sockaddr_Storage */
 #cmakedefine HAVE_SOCKADDR_STORAGE "@HAVE_SOCKADDR_STORAGE@"
+#cmakedefine HAVE_STRUCT_ADDRINFO "@HAVE_STRUCT_ADDRINFO@"
+#cmakedefine HAVE_STRUCT_IOVEC "@HAVE_STRUCT_IOVEC@"
 
 /* Whether we have linger */
 #cmakedefine HAVE_LINGER "@HAVE_LINGER@"

@@ -213,7 +213,7 @@ smb2_process_tree_connect_fixed(struct smb2_context *smb2,
                 return -1;
         }
 
-        rep = malloc(sizeof(*rep));
+        rep = calloc(1, sizeof(*rep));
         if (rep == NULL) {
                 smb2_set_error(smb2, "Failed to allocate tcon reply");
                 return -1;
@@ -227,8 +227,23 @@ smb2_process_tree_connect_fixed(struct smb2_context *smb2,
         smb2_get_uint32(iov, 8, &rep->capabilities);
         smb2_get_uint32(iov, 12, &rep->maximal_access);
 
-        if (!smb2->seal)
-                smb2->seal = !!(rep->share_flags & SMB2_SHAREFLAG_ENCRYPT_DATA);
+        /*
+         * Auto-enable sealing if the share mandates it, unless the caller
+         * explicitly disabled encryption (SMB2_SEAL_NONE) -- in that case
+         * we never advertised SMB2_GLOBAL_CAP_ENCRYPTION during negotiate,
+         * so there is no negotiated cipher to actually seal with even if
+         * the share reports SMB2_SHAREFLAG_ENCRYPT_DATA.
+         */
+        if (!smb2->seal && smb2->seal_requested != SMB2_SEAL_NONE &&
+            (rep->share_flags & SMB2_SHAREFLAG_ENCRYPT_DATA)) {
+                if (!smb2->enc_keys_ready) {
+                        smb2_set_error(smb2, "Share requires encryption but "
+                                       "dialect 0x%04x has no encryption "
+                                       "keys", smb2->dialect);
+                        return -1;
+                }
+                smb2->seal = 1;
+        }
 
         return 0;
 }
@@ -251,7 +266,7 @@ smb2_process_tree_connect_request_fixed(struct smb2_context *smb2,
                 return -1;
         }
 
-        req = malloc(sizeof(*req));
+        req = calloc(1, sizeof(*req));
         if (req == NULL) {
                 smb2_set_error(smb2, "Failed to allocate tcon request");
                 return -1;

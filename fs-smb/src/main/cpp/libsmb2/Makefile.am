@@ -2,7 +2,11 @@ if ENABLE_EXAMPLES
     MAYBE_EXAMPLES = examples
 endif
 
-SUBDIRS = include lib utils . $(MAYBE_EXAMPLES)
+if BUILD_LIBDCERPC
+    MAYBE_LIBDCERPC = libdcerpc
+endif
+
+SUBDIRS = include lib $(MAYBE_LIBDCERPC) utils . $(MAYBE_EXAMPLES)
 ACLOCAL_AMFLAGS = -I m4
 
 pkgconfigdir = $(libdir)/pkgconfig

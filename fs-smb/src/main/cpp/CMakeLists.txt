@@ -4,8 +4,8 @@ project(samba_jni C CXX)
 set(LIBSMB2_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libsmb2)
 
 # ── libsmb2 static library ──────────────────────────────────────────────────
-# Exclude: krb5-wrapper.c (Kerberos), aes_apple.c (macOS), aes_reference.c
-#          (redundant with aes.c which has the optimised implementation)
+# Vendored libsmb2 7.0.0 at 62a861a043fadb69ee375464efb17e94099f8f76.
+# The Android build omits the Kerberos and Apple AES backends.
 file(GLOB LIBSMB2_SRCS ${LIBSMB2_DIR}/lib/*.c)
 list(FILTER LIBSMB2_SRCS EXCLUDE REGEX
     "(krb5-wrapper|aes_apple)\\.c$")

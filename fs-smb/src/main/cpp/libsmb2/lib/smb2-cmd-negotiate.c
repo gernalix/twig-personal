@@ -91,13 +91,25 @@ smb2_encode_preauth_context(struct smb2_context *smb2, struct smb2_pdu *pdu)
 }
 
 static int
-smb2_encode_encryption_context(struct smb2_context *smb2, struct smb2_pdu *pdu)
+smb2_encode_encryption_context(struct smb2_context *smb2, struct smb2_pdu *pdu, int reply)
 {
         uint8_t *buf;
-        int len, data_len;
+        int len, data_len, i, n = 0;
         struct smb2_iovec *iov;
+        uint16_t ciphers[3];
 
-        data_len = PAD_TO_64BIT(4);
+        if (reply) {
+                /* the one we chose, 0 if we have none in common */
+                ciphers[n++] = smb2->cypher;
+        } else {
+#ifdef HAVE_OPENSSL
+                ciphers[n++] = SMB2_ENCRYPTION_AES_256_GCM;
+                ciphers[n++] = SMB2_ENCRYPTION_AES_128_GCM;
+#endif
+                ciphers[n++] = SMB2_ENCRYPTION_AES_128_CCM;
+        }
+
+        data_len = PAD_TO_64BIT(2 + 2 * n);
         len = 8 + data_len;
         len = PAD_TO_64BIT(len);
         buf = malloc(len);
@@ -113,8 +125,10 @@ smb2_encode_encryption_context(struct smb2_context *smb2, struct smb2_pdu *pdu)
         }
         smb2_set_uint16(iov, 0, SMB2_ENCRYPTION_CAP);
         smb2_set_uint16(iov, 2, data_len);
-        smb2_set_uint16(iov, 8, 1);
-        smb2_set_uint16(iov, 10, SMB2_ENCRYPTION_AES_128_CCM);
+        smb2_set_uint16(iov, 8, n);
+        for (i = 0; i < n; i++) {
+                smb2_set_uint16(iov, 10 + 2 * i, ciphers[i]);
+        }
 
         return 0;
 }
@@ -127,6 +141,16 @@ smb2_encode_negotiate_request(struct smb2_context *smb2,
         uint8_t *buf;
         int i, len;
         struct smb2_iovec *iov;
+
+        /* req->dialects only has room for SMB2_NEGOTIATE_MAX_DIALECTS
+         * entries, so a larger count would read past the end of it below.
+         */
+        if (req->dialect_count > SMB2_NEGOTIATE_MAX_DIALECTS) {
+                smb2_set_error(smb2, "Too many dialects (%d) in negotiate "
+                               "request, max is %d", req->dialect_count,
+                               SMB2_NEGOTIATE_MAX_DIALECTS);
+                return -1;
+        }
 
         len = SMB2_NEGOTIATE_REQUEST_SIZE +
                 req->dialect_count * sizeof(uint16_t);
@@ -161,10 +185,12 @@ smb2_encode_negotiate_request(struct smb2_context *smb2,
                 }
                 req->negotiate_context_count++;
 
-                if (smb2_encode_encryption_context(smb2, pdu)) {
-                        return -1;
+                if (req->capabilities & SMB2_GLOBAL_CAP_ENCRYPTION) {
+                        if (smb2_encode_encryption_context(smb2, pdu, 0)) {
+                                return -1;
+                        }
+                        req->negotiate_context_count++;
                 }
-                req->negotiate_context_count++;
         }
 
         smb2_set_uint16(iov, 0, SMB2_NEGOTIATE_REQUEST_SIZE);
@@ -177,6 +203,15 @@ smb2_encode_negotiate_request(struct smb2_context *smb2,
         for (i = 0; i < req->dialect_count; i++) {
                 smb2_set_uint16(iov, 36 + i * sizeof(uint16_t),
                                 req->dialects[i]);
+        }
+
+        /* Remember what we offered so that smb2_process_negotiate_fixed()
+         * can verify the server picked one of these and did not downgrade
+         * us to a dialect we never asked for.
+         */
+        smb2->offered_dialect_count = req->dialect_count;
+        for (i = 0; i < req->dialect_count; i++) {
+                smb2->offered_dialects[i] = req->dialects[i];
         }
 
         return 0;
@@ -213,7 +248,7 @@ smb2_encode_negotiate_reply(struct smb2_context *smb2,
                               struct smb2_negotiate_reply *rep)
 {
         uint8_t *buf;
-        int len, seclen;
+        int len, seclen = 0;
         struct smb2_iovec *iov;
 
         len = SMB2_NEGOTIATE_REPLY_SIZE & 0xfffe;
@@ -239,8 +274,11 @@ smb2_encode_negotiate_reply(struct smb2_context *smb2,
         }
 
         if (rep->security_buffer_length) {
-                seclen = rep->security_buffer_length;
-                seclen = PAD_TO_64BIT(len);
+                /* The buffer has to be sized from the security buffer we are
+                 * about to copy into it, not from the size of the fixed part
+                 * of the reply.
+                 */
+                seclen = PAD_TO_64BIT(rep->security_buffer_length);
                 /* Security buffer */
                 buf = malloc(seclen);
                 if (buf == NULL) {
@@ -265,10 +303,12 @@ smb2_encode_negotiate_reply(struct smb2_context *smb2,
                 }
                 rep->negotiate_context_count++;
 
-                if (smb2_encode_encryption_context(smb2, pdu)) {
-                        return -1;
+                if (smb2->enc_cap_offered) {
+                        if (smb2_encode_encryption_context(smb2, pdu, 1)) {
+                                return -1;
+                        }
+                        rep->negotiate_context_count++;
                 }
-                rep->negotiate_context_count++;
         }
 
         smb2_set_uint16(iov, 0, SMB2_NEGOTIATE_REPLY_SIZE);
@@ -324,10 +364,31 @@ static int
 smb2_parse_encryption_context(struct smb2_context *smb2,
                               struct smb2_negotiate_reply *rep,
                               struct smb2_iovec *iov,
-                              int offset)
+                              int offset, int len)
 {
-        smb2_get_uint16(iov, offset, &rep->cypher);
-        return 0;
+        uint16_t count;
+
+        if (len < 4) {
+                smb2_set_error(smb2, "Encryption context too short");
+                return -1;
+        }
+        smb2_get_uint16(iov, offset, &count);
+        smb2_get_uint16(iov, offset + 2, &rep->cypher);
+        if (count != 1) {
+                smb2_set_error(smb2, "Server selected %d ciphers", count);
+                return -1;
+        }
+        switch (rep->cypher) {
+        case 0: /* no common cipher */
+        case SMB2_ENCRYPTION_AES_128_CCM:
+#ifdef HAVE_OPENSSL
+        case SMB2_ENCRYPTION_AES_128_GCM:
+        case SMB2_ENCRYPTION_AES_256_GCM:
+#endif
+                return 0;
+        }
+        smb2_set_error(smb2, "Server selected cipher 0x%04x that we did not offer", rep->cypher);
+        return -1;
 }
 
 static int
@@ -339,19 +400,26 @@ smb2_parse_negotiate_contexts(struct smb2_context *smb2,
         uint16_t type, len;
 
         while (count--) {
-                if (offset > (int)iov->len) {
-                        smb2_set_error(smb2, "Bad len in negotiate context\n");
+                /* the 8 byte context header must be present, and the context
+                 * data it describes must fit in what is left of the buffer
+                 */
+                if (offset < 0 || (size_t)offset + 8 > iov->len) {
+                        smb2_set_error(smb2, "Bad offset in negotiate context");
                         return -1;
                 }
                 smb2_get_uint16(iov, offset, &type);
                 smb2_get_uint16(iov, offset + 2, &len);
+                if ((size_t)len > iov->len - offset - 8) {
+                        smb2_set_error(smb2, "Bad len in negotiate context");
+                        return -1;
+                }
 
                 switch (type) {
                 case SMB2_PREAUTH_INTEGRITY_CAP:
                         break;
                 case SMB2_ENCRYPTION_CAP:
                         if (smb2_parse_encryption_context(smb2, rep,
-                                                          iov, offset + 8)) {
+                                                          iov, offset + 8, len)) {
                                 return -1;
                         }
                         break;
@@ -390,7 +458,7 @@ smb2_process_negotiate_fixed(struct smb2_context *smb2,
                 return -1;
         }
 
-        rep = malloc(sizeof(*rep));
+        rep = calloc(1, sizeof(*rep));
         if (rep == NULL) {
                 smb2_set_error(smb2, "Failed to allocate negotiate reply");
                 return -1;
@@ -400,7 +468,35 @@ smb2_process_negotiate_fixed(struct smb2_context *smb2,
 
         smb2_get_uint16(iov, 2, &rep->security_mode);
         smb2_get_uint16(iov, 4, &rep->dialect_revision);
+
+        /*
+         * The dialect is what selects signing, encryption and preauth
+         * integrity for the rest of the connection, so a server that is
+         * allowed to answer with a dialect we never offered can silently
+         * downgrade us out of all three. Only accept one of the dialects we
+         * actually put in our negotiate request.
+         */
+        if (smb2->offered_dialect_count) {
+                int d;
+
+                for (d = 0; d < smb2->offered_dialect_count; d++) {
+                        if (smb2->offered_dialects[d] ==
+                            rep->dialect_revision) {
+                                break;
+                        }
+                }
+                if (d >= smb2->offered_dialect_count) {
+                        smb2_set_error(smb2, "Server picked dialect 0x%04x "
+                                       "which we did not offer",
+                                       rep->dialect_revision);
+                        pdu->payload = NULL;
+                        free(rep);
+                        return -1;
+                }
+        }
+
         memcpy(rep->server_guid, iov->buf + 8, SMB2_GUID_SIZE);
+        memcpy(smb2->server_guid, iov->buf + 8, SMB2_GUID_SIZE);
         smb2_get_uint32(iov, 24, &rep->capabilities);
         smb2_get_uint32(iov, 28, &rep->max_transact_size);
         smb2_get_uint32(iov, 32, &rep->max_read_size);
@@ -411,7 +507,8 @@ smb2_process_negotiate_fixed(struct smb2_context *smb2,
         smb2_get_uint16(iov, 58, &rep->security_buffer_length);
 
         if (rep->security_buffer_length &&
-            (rep->security_buffer_offset + rep->security_buffer_length > (uint16_t)smb2->spl)) {
+            ((uint32_t)rep->security_buffer_offset +
+             rep->security_buffer_length > smb2->spl)) {
                 smb2_set_error(smb2, "Security buffer extends beyond end of "
                                "PDU");
                 pdu->payload = NULL;
@@ -499,7 +596,7 @@ smb2_process_negotiate_request_fixed(struct smb2_context *smb2,
                 return -1;
         }
 
-        req = malloc(sizeof(*req));
+        req = calloc(1, sizeof(*req));
         if (req == NULL) {
                 smb2_set_error(smb2, "Failed to allocate negotiate request");
                 return -1;
@@ -531,11 +628,49 @@ smb2_process_negotiate_request_fixed(struct smb2_context *smb2,
 }
 
 static int
+smb2_cipher_supported(uint16_t cipher)
+{
+        switch (cipher) {
+        case SMB2_ENCRYPTION_AES_128_CCM:
+#ifdef HAVE_OPENSSL
+        case SMB2_ENCRYPTION_AES_128_GCM:
+        case SMB2_ENCRYPTION_AES_256_GCM:
+#endif
+                return 1;
+        }
+        return 0;
+}
+
+/* Take the first cipher in the client's order that we support, or 0
+ * when there is none, which the reply reports as no common cipher. */
+static int
 smb2_parse_encryption_request_context(struct smb2_context *smb2,
                               struct smb2_negotiate_request *req,
                               struct smb2_iovec *iov,
                               int offset, int len)
 {
+        uint16_t count, cipher;
+        int i;
+
+        smb2->cypher = 0;
+        smb2->enc_cap_offered = 1;
+        if (len < 2) {
+                smb2_set_error(smb2, "Encryption context too short");
+                return -1;
+        }
+        smb2_get_uint16(iov, offset, &count);
+        if (2 + 2 * (int)count > len) {
+                smb2_set_error(smb2, "Encryption context cipher count %d "
+                               "does not fit in %d bytes", count, len);
+                return -1;
+        }
+        for (i = 0; i < count; i++) {
+                smb2_get_uint16(iov, offset + 2 + 2 * i, &cipher);
+                if (smb2_cipher_supported(cipher)) {
+                        smb2->cypher = cipher;
+                        break;
+                }
+        }
         return 0;
 }
 
@@ -547,6 +682,11 @@ smb2_parse_netname_request_context(struct smb2_context *smb2,
 {
         char *client;
 
+        if (offset < 0 || len < 0 || (size_t)offset + (size_t)len > iov->len) {
+                smb2_set_error(smb2, "Netname context extends beyond the "
+                               "negotiate request");
+                return -1;
+        }
         client = discard_const(smb2_utf16_to_utf8((uint16_t *)(void *)(iov->buf + offset), len / 2));
         free(client);
         return 0;
@@ -561,10 +701,16 @@ smb2_parse_negotiate_request_contexts(struct smb2_context *smb2,
         uint16_t type, len;
 
         while (count--) {
+                /* the 8 byte context header must be present, and the context
+                 * data it describes must fit in what is left of the buffer
+                 */
+                if (offset < 0 || (size_t)offset + 8 > iov->len) {
+                        smb2_set_error(smb2, "Bad offset in negotiate context");
+                        return -1;
+                }
                 smb2_get_uint16(iov, offset, &type);
                 smb2_get_uint16(iov, offset + 2, &len);
-
-                if (offset > (int)iov->len) {
+                if ((size_t)len > iov->len - offset - 8) {
                         smb2_set_error(smb2, "Bad len in negotiate context");
                         return -1;
                 }
@@ -643,4 +789,3 @@ smb2_process_negotiate_request_variable(struct smb2_context *smb2,
 
         return 0;
 }
-

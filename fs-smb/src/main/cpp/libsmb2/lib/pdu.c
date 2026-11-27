@@ -117,6 +117,12 @@ smb2_allocate_pdu(struct smb2_context *smb2, enum smb2_command command,
                  * looking at traces.
                  */
                 hdr->credit_charge = 0;
+        } else if (hdr->command == SMB2_CANCEL) {
+                /* CANCEL reuses the MessageId (or AsyncId) of the request
+                 * it cancels instead of consuming a new one, so it must
+                 * not charge any credits of its own.
+                 */
+                hdr->credit_charge = 0;
         } else {
                 /* Assume the credits for this PDU will be 1.
                  * READ/WRITE/IOCTL/QUERYDIR that consumes more than
@@ -132,7 +138,7 @@ smb2_allocate_pdu(struct smb2_context *smb2, enum smb2_command command,
         case SMB2_SESSION_SETUP:
         case SMB2_LOGOFF:
         case SMB2_ECHO:
-        /* case SMB2_CANCEL: */
+        case SMB2_CANCEL:
                 hdr->sync.tree_id = 0;
                 break;
         case SMB2_TREE_CONNECT:
@@ -211,7 +217,7 @@ smb2_get_tree_id_for_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, uint32
                 case SMB2_SESSION_SETUP:
                 case SMB2_LOGOFF:
                 case SMB2_ECHO:
-                /* case SMB2_CANCEL: */
+                case SMB2_CANCEL:
                 case SMB2_TREE_CONNECT:
                         *tree_id  = 0;
                         return 0;
@@ -243,7 +249,7 @@ smb2_set_tree_id_for_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, uint32
                 case SMB2_SESSION_SETUP:
                 case SMB2_LOGOFF:
                 case SMB2_ECHO:
-                /* case SMB2_CANCEL: */
+                case SMB2_CANCEL:
                         break;
                 case SMB2_TREE_CONNECT:
                         break;
@@ -315,9 +321,10 @@ smb2_pdu_is_compound(struct smb2_context *smb2)
                 (smb2->hdr.next_command != 0) : 0;
 }
 
-void
-smb2_add_compound_pdu(struct smb2_context *smb2,
-                      struct smb2_pdu *pdu, struct smb2_pdu *next_pdu)
+static void
+_smb2_add_compound_pdu(struct smb2_context *smb2,
+                       struct smb2_pdu *pdu, struct smb2_pdu *next_pdu,
+                       int is_related)
 {
         int i, offset;
 
@@ -335,9 +342,47 @@ smb2_add_compound_pdu(struct smb2_context *smb2,
         pdu->header.next_command = offset;
         smb2_set_uint32(&pdu->out.iov[0], 20, pdu->header.next_command);
 
-        /* Fixup flags */
-        next_pdu->header.flags |= SMB2_FLAGS_RELATED_OPERATIONS;
+        if (is_related) {
+                /* Fixup flags */
+                next_pdu->header.flags |= SMB2_FLAGS_RELATED_OPERATIONS;
+        } else {
+                /*
+                 * This is an UNRELATED compound.
+                 * Do NOT set SMB2_FLAGS_RELATED_OPERATIONS.
+                 *
+                 * Only touch next_pdu here, never pdu (the last pdu of
+                 * whatever chain we are appending to): pdu may already
+                 * be legitimately related to its own predecessor from
+                 * an earlier smb2_add_compound_pdu() call, and clearing
+                 * that would corrupt the FileId that relatedness was
+                 * supposed to resolve, turning a compound_file_id
+                 * placeholder into a bogus literal FileId.
+                 */
+                next_pdu->header.flags &= ~SMB2_FLAGS_RELATED_OPERATIONS;
+
+                /*
+                 * Mark the new pdu so the receive path knows not to
+                 * enforce compound ordering against whatever came
+                 * before it.
+                 */
+                next_pdu->unrelated_compound = 1;
+        }
         smb2_set_uint32(&next_pdu->out.iov[0], 16, next_pdu->header.flags);
+}
+
+void
+smb2_add_compound_pdu(struct smb2_context *smb2,
+                      struct smb2_pdu *pdu, struct smb2_pdu *next_pdu)
+{
+        _smb2_add_compound_pdu(smb2, pdu, next_pdu, 1);
+}
+
+void
+smb2_add_unrelated_compound_pdu(struct smb2_context *smb2,
+                                struct smb2_pdu *pdu,
+                                struct smb2_pdu *next_pdu)
+{
+        _smb2_add_compound_pdu(smb2, pdu, next_pdu, 0);
 }
 
 void
@@ -460,7 +505,7 @@ static void
 smb2_encode_header(struct smb2_context *smb2, struct smb2_iovec *iov,
                    struct smb2_header *hdr)
 {
-        if (!smb2_is_server(smb2)) {
+        if (!smb2_is_server(smb2) && hdr->command != SMB2_CANCEL) {
                 hdr->message_id = smb2->message_id++;
                 if (hdr->credit_charge > 1) {
                         smb2->message_id += (hdr->credit_charge - 1);
@@ -500,11 +545,7 @@ smb2_decode_header(struct smb2_context *smb2, struct smb2_iovec *iov,
         static char smb1sign[4] = {0xFF, 'S', 'M', 'B'};
         static char smb2sign[4] = {0xFE, 'S', 'M', 'B'};
 
-        if (iov->len < SMB2_HEADER_SIZE) {
-                smb2_set_error(smb2, "io vector for header is too small");
-                return -1;
-        }
-        if (!memcmp(iov->buf, smb1sign, 4)) {
+        if (iov->len >= 5 && !memcmp(iov->buf, smb1sign, 4)) {
                 /* an SMBv1 request. if it is a negotiate request
                  * allow it through, else ingore */
                 if (iov->buf[4] == SMB1_NEGOTIATE) {
@@ -514,6 +555,10 @@ smb2_decode_header(struct smb2_context *smb2, struct smb2_iovec *iov,
                         return 0;
                 }
                 smb2_set_error(smb2, "not handling SMBv1 request");
+                return -1;
+        }
+        if (iov->len < SMB2_HEADER_SIZE) {
+                smb2_set_error(smb2, "io vector for header is too small");
                 return -1;
         }
         if (memcmp(iov->buf, smb2sign, 4)) {
@@ -548,7 +593,7 @@ smb2_decode_header(struct smb2_context *smb2, struct smb2_iovec *iov,
                         case SMB2_SESSION_SETUP:
                         case SMB2_LOGOFF:
                         case SMB2_ECHO:
-                        /* case SMB2_CANCEL: */
+                        case SMB2_CANCEL:
                                 break;
                         case SMB2_TREE_CONNECT:
                                 break;
@@ -665,6 +710,11 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
         struct smb2_pdu *p;
         uint64_t prev_compound_mid = 0;
 
+        /* Report only this call. The caller reads queue_rejected before
+         * it returns, so the next call may clear it. The outer abort
+         * clears it again after its own callbacks, which did run. */
+        smb2->queue_rejected = 0;
+
         /* Update all the PDU headers in this chain */
         for (p = pdu; p; p = p->next_compound) {
                 if (smb2_is_server(smb2)) {
@@ -693,13 +743,23 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                         /*
                          * Track the mid of the previous command in the chain
                          * so we can enforce ordering on receive.
+                         *
+                         * Related compounds require replies to be processed
+                         * in order.
+                         *
+                         * Unrelated compounds do not have this dependency.
                          */
-                        p->prev_compound_mid = prev_compound_mid;
+                        if (p->unrelated_compound) {
+                                p->prev_compound_mid = 0;
+                        } else {
+                                p->prev_compound_mid = prev_compound_mid;
+                        }
+
                         prev_compound_mid = p->header.message_id;
                 }
 
-                if (smb2->sign ||
-                    (p->header.command == SMB2_TREE_CONNECT && smb2->dialect == SMB2_VERSION_0311 && !smb2->seal)) {
+                if (!p->never_sign && (smb2->sign || p->must_sign ||
+                    (p->header.command == SMB2_TREE_CONNECT && smb2->dialect == SMB2_VERSION_0311 && !smb2->seal))) {
                         if (smb2_pdu_add_signature(smb2, p) < 0) {
                                 smb2_set_error(smb2, "Failure to add "
                                                "signature. %s",
@@ -708,7 +768,59 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                 }
         }
 
-        smb3_encrypt_pdu(smb2, pdu);
+        if (smb3_encrypt_pdu(smb2, pdu) < 0) {
+                /*
+                 * The whole chain is about to be freed without ever being
+                 * sent. Fire every member's callback first, the way
+                 * smb2_destroy_context() does, so shared compound callback
+                 * state sees each holder go away — otherwise the state never
+                 * completes and the user callback is lost.
+                 */
+                if (smb2->in_queue_abort) {
+                        /*
+                         * A callback fired by the outer abort synchronously
+                         * queued this. Firing it now would recurse without
+                         * bound, so leave the chain unfired. The caller
+                         * still owns a caller_frees pdu and must not wait
+                         * for a callback.
+                         */
+                        smb2->queue_rejected = 1;
+                        smb2_set_error(smb2, "Cannot queue a command while "
+                                       "another one is being aborted.");
+                        if (!pdu->caller_frees_pdu) {
+                                smb2_free_pdu(smb2, pdu);
+                        }
+                        return;
+                }
+                smb2->in_queue_abort = 1;
+                for (p = pdu; p; p = p->next_compound) {
+                        if (p->cb) {
+                                p->cb(smb2, SMB2_STATUS_SHUTDOWN,
+                                      NULL, p->cb_data);
+                        }
+                }
+                smb2->in_queue_abort = 0;
+                /* Nested queues set this. This call did fire its own
+                 * callbacks, so its caller must not treat it as rejected. */
+                smb2->queue_rejected = 0;
+                if (!pdu->caller_frees_pdu) {
+                        smb2_free_pdu(smb2, pdu);
+                }
+                smb2_close_context(smb2);
+                return;
+        }
+
+        /*
+         * The preauth hash has to cover the bytes we actually put on the
+         * wire, so it can only be taken now that the header is encoded and
+         * the pdu is signed. It also has to be taken before the pdu goes
+         * on the outqueue, because a server writes its replies out from
+         * there straight away and frees them, and reading the pdu back
+         * afterwards is a use after free.
+         */
+        if (pdu->update_preauth_hash) {
+                smb3_update_preauth_hash(smb2, pdu->out.niov, &pdu->out.iov[0]);
+        }
 
         smb2_add_to_outqueue(smb2, pdu);
 }
@@ -763,6 +875,39 @@ smb2_get_last_reply_message_id(struct smb2_context *smb2)
         return 0;
 }
 
+uint32_t
+smb2_get_last_request_tree_id(struct smb2_context *smb2)
+{
+        if (smb2 && !(smb2->hdr.flags & SMB2_FLAGS_ASYNC_COMMAND)) {
+                return smb2->hdr.sync.tree_id;
+        }
+        return 0;
+}
+
+uint64_t
+smb2_get_last_request_async_id(struct smb2_context *smb2)
+{
+        if (smb2 && (smb2->hdr.flags & SMB2_FLAGS_ASYNC_COMMAND)) {
+                return smb2->hdr.async.async_id;
+        }
+        return 0;
+}
+
+uint64_t
+smb2_get_async_id(struct smb2_context *smb2, uint64_t message_id)
+{
+        struct smb2_pdu *pdu;
+
+        if (smb2 == NULL) {
+                return 0;
+        }
+        pdu = smb2_find_pdu(smb2, message_id);
+        if (pdu && (pdu->header.flags & SMB2_FLAGS_ASYNC_COMMAND)) {
+                return pdu->header.async.async_id;
+        }
+        return 0;
+}
+
 struct smb2_pdu *
 smb2_find_pdu(struct smb2_context *smb2,
               uint64_t message_id) {
@@ -779,6 +924,9 @@ smb2_find_pdu(struct smb2_context *smb2,
 static int
 smb2_is_error_response(struct smb2_context *smb2,
                        struct smb2_pdu *pdu) {
+        if (pdu->header.command == SMB2_IOCTL && pdu->ioctl_reply_format) {
+                return 0;
+        }
         if ((smb2->hdr.status & SMB2_STATUS_SEVERITY_MASK) ==
             SMB2_STATUS_SEVERITY_ERROR) {
                 switch (smb2->hdr.status) {
@@ -1136,22 +1284,47 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
         while (pdu) {
                 next = pdu->next;
                 if (pdu->timeout && pdu->timeout < t) {
+                        struct smb2_pdu *p;
+
                         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
-                        pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,
-                                pdu->cb_data);
-                        smb2_free_pdu(smb2, pdu);
+                        /*
+                         * An unsent compound is still chained: like
+                         * smb2_destroy_context(), fire every member's
+                         * callback so shared compound callback state sees
+                         * each holder go away, then free the whole chain
+                         * once. Firing only the head would strand the
+                         * siblings' references.
+                         */
+                        for (p = pdu; p; p = p->next_compound) {
+                                if (p->cb) {
+                                        p->cb(smb2, SMB2_STATUS_IO_TIMEOUT,
+                                              NULL, p->cb_data);
+                                }
+                        }
+                        if (!pdu->caller_frees_pdu) {
+                                smb2_free_pdu(smb2, pdu);
+                        }
                 }
                 pdu = next;
         }
 
+        /*
+         * Waitqueue entries are always individual PDUs: the write path
+         * clears next_compound as it moves each chain member onto the
+         * waitqueue.
+         */
         pdu = smb2->waitqueue;
         while (pdu) {
                 next = pdu->next;
                 if (pdu->timeout && pdu->timeout < t) {
                         SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
-                        pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,
-                                pdu->cb_data);
-                        smb2_free_pdu(smb2, pdu);
+                        if (pdu->cb) {
+                                pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,
+                                        pdu->cb_data);
+                        }
+                        if (!pdu->caller_frees_pdu) {
+                                smb2_free_pdu(smb2, pdu);
+                        }
                 }
                 pdu = next;
         }

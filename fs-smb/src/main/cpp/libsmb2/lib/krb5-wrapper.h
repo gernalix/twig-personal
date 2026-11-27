@@ -34,8 +34,11 @@ extern "C" {
 
 #include <krb5/krb5.h>
 
-#if __APPLE__
-#import <GSS/GSS.h>
+/* Use Apple's GSS.framework only where it actually exists (issue #476);
+ * otherwise fall back to the normal Unix gssapi/gssapi.h codepath, e.g.
+ * when linking against a Heimdal/MIT krb5 install on macOS. */
+#if defined(__APPLE__) && defined(HAVE_GSS_GSS_H)
+#include <GSS/GSS.h>
 #else
 #include <gssapi/gssapi.h>
 #include <gssapi/gssapi_ext.h>
@@ -61,6 +64,18 @@ struct private_auth_data {
         gss_const_OID mech_type;
         uint32_t req_flags;
         gss_buffer_desc output_token;
+        /* SPNEGO wrapping of output_token for SMB2_SEC_IAKERB. The GSS
+         * token stays in output_token; this is what goes on the wire. */
+        unsigned char *spnego_buf;
+        int spnego_len;
+        int iakerb_complete;
+        int iakerb_mic_verified;
+        /* Server: SPNEGO is done here when the client prefers IAKerb,
+         * because MIT's SPNEGO never negotiates it. */
+        gss_cred_id_t iakerb_cred;
+        int iakerb_server;
+        unsigned char *mech_types;
+        int mech_types_len;
         int get_proxy_cred;
         int use_spnego;
         char *g_server;

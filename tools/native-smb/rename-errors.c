@@ -24,15 +24,17 @@ static void completed(struct smb2_context *ctx, int status, void *data, void *pr
 static void check(uint32_t open_status, uint32_t rename_status, uint32_t close_status,
                   uint32_t expected)
 {
-        struct rename_cb_data *data = calloc(1, sizeof(*data));
+        struct new_name_cb_data *data = calloc(1, sizeof(*data));
         assert(data);
         data->cb = completed;
+        data->pending = 3;
         error_text[0] = '\0';
         error_status = 0;
         result = 123;
-        rename_cb_1(NULL, open_status, NULL, data);
-        rename_cb_2(NULL, rename_status, NULL, data);
-        rename_cb_3(NULL, close_status, NULL, data);
+        new_name_cb_1(NULL, open_status, NULL, data);
+        new_name_cb_2(NULL, rename_status, NULL, data);
+        assert(result == 123);
+        new_name_cb_3(NULL, close_status, NULL, data);
         assert(result == -nterror_to_errno(expected));
         if (expected == SMB2_STATUS_SUCCESS) {
                 assert(error_text[0] == '\0');
@@ -48,10 +50,12 @@ static void check_create_delete(uint32_t open_status, uint32_t close_status, uin
         struct create_cb_data *data = calloc(1, sizeof(*data));
         assert(data);
         data->cb = completed;
+        data->pending = 2;
         error_text[0] = '\0';
         error_status = 0;
         result = 123;
         create_cb_1(NULL, open_status, NULL, data);
+        assert(result == 123);
         create_cb_2(NULL, close_status, NULL, data);
         assert(result == -nterror_to_errno(expected));
         if (expected == SMB2_STATUS_SUCCESS) {

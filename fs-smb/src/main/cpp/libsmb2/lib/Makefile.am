@@ -17,9 +17,6 @@ libsmb2_la_SOURCES = \
 	asn1-ber.c \
 	compat.c \
 	compat.h \
-	dcerpc.c \
-	dcerpc-lsa.c \
-	dcerpc-srvsvc.c \
 	errors.c \
 	init.c \
 	hmac.c \
@@ -35,11 +32,14 @@ libsmb2_la_SOURCES = \
 	ntlmssp.h \
 	ntlmssp.c \
 	pdu.c \
+	quic.c \
+	smbdirect.c \
 	sha.h \
 	sha-private.h \
 	sha1.c \
 	sha224-256.c \
 	sha384-512.c \
+	smb2-cmd-cancel.c \
 	smb2-cmd-close.c \
 	smb2-cmd-create.c \
 	smb2-cmd-echo.c \
@@ -50,7 +50,7 @@ libsmb2_la_SOURCES = \
 	smb2-cmd-logoff.c \
 	smb2-cmd-negotiate.c \
 	smb2-cmd-notify-change.c \
-    smb2-cmd-oplock-break.c \
+	smb2-cmd-oplock-break.c \
 	smb2-cmd-query-directory.c \
 	smb2-cmd-query-info.c \
 	smb2-cmd-read.c \
@@ -75,11 +75,14 @@ libsmb2_la_SOURCES = \
 	unicode.c \
 	usha.c
 
-SOCURRENT=6
-SOREVISION=1
+SOCURRENT=7
+SOREVISION=0
 SOAGE=0
+
 libsmb2_la_LDFLAGS = \
 	-version-info $(SOCURRENT):$(SOREVISION):$(SOAGE) -bindir $(bindir) \
-	-no-undefined -export-symbols ${srcdir}/libsmb2.syms $(MAYBE_LIBKRB5)
+	-no-undefined -export-symbols $(srcdir)/libsmb2.syms $(MAYBE_LIBKRB5) \
+	$(MAYBE_LIBQUIC) $(MAYBE_LIBRDMACM) $(MAYBE_LIBCRYPTO)
+libsmb2_la_DEPENDENCIES = $(srcdir)/libsmb2.syms
 
 dist_noinst_DATA = libsmb2.syms

@@ -172,7 +172,7 @@ smb2_cmd_read_async(struct smb2_context *smb2,
         }
 
         /* Adjust credit charge for large payloads */
-        if (smb2->supports_multi_credit) {
+        if (smb2->supports_multi_credit && req->length > 0) {
                 pdu->header.credit_charge = (req->length - 1) / 65536 + 1; /* 3.1.5.2 of [MS-SMB2] */
         }
 
@@ -260,7 +260,7 @@ smb2_process_read_fixed(struct smb2_context *smb2,
                 return -1;
         }
 
-        rep = malloc(sizeof(*rep));
+        rep = calloc(1, sizeof(*rep));
         if (rep == NULL) {
                 smb2_set_error(smb2, "Failed to allocate read reply");
                 return -1;
@@ -274,6 +274,41 @@ smb2_process_read_fixed(struct smb2_context *smb2,
         rep->data = NULL;
         if (rep->data_length == 0) {
                 return 0;
+        }
+
+        /* DataLength is handed back to the receive loop as the size of the
+         * variable part and drives a malloc of that size, so a server that
+         * claims more data than the PDU can hold must not get us to
+         * allocate (and try to read) it.
+         */
+        if ((uint64_t)rep->data_offset + rep->data_length >
+            (uint64_t)smb2->spl) {
+                smb2_set_error(smb2, "Read data extends beyond end of PDU");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
+
+        /* The data goes into the buffer the read was issued with, and
+         * anything past it into a scratch tail, but data_length is what
+         * callers are told was read: more than was asked for would have
+         * them use bytes their buffer does not hold.
+         */
+        if (pdu->in.niov) {
+                size_t asked = 0;
+                int i;
+
+                for (i = 0; i < pdu->in.niov; i++) {
+                        asked += pdu->in.iov[i].len;
+                }
+                if (rep->data_length > asked) {
+                        smb2_set_error(smb2, "Read returned %u bytes, "
+                                       "%zu were asked for",
+                                       rep->data_length, asked);
+                        pdu->payload = NULL;
+                        free(rep);
+                        return -1;
+                }
         }
 
         if (rep->data_offset != SMB2_HEADER_SIZE + 16) {
@@ -351,11 +386,15 @@ smb2_process_read_request_fixed(struct smb2_context *smb2,
         smb2_get_uint32(iov, 32, &req->minimum_count);
         smb2_get_uint32(iov, 36, &req->channel);
         smb2_get_uint32(iov, 40, &req->remaining_bytes);
+        /* The length has to be read before it can be tested, otherwise the
+         * offset is never decoded and every request that carries channel
+         * info gets rejected below.
+         */
+        smb2_get_uint16(iov, 46, &req->read_channel_info_length);
         if (req->read_channel_info_length) {
                 req->read_channel_info_offset = (SMB2_READ_REQUEST_SIZE & 0xfffffffe) + SMB2_HEADER_SIZE;
                 smb2_get_uint16(iov, 44, &req->read_channel_info_offset);
         }
-        smb2_get_uint16(iov, 46, &req->read_channel_info_length);
 
         if (req->length > smb2->max_read_size) {
                 smb2_set_error(smb2, "can not read more than %d bytes", smb2->max_read_size);

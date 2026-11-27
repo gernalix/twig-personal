@@ -137,3 +137,31 @@
 
 /* Version number of package */
 #define VERSION "4.0.0"
+
+/* Pick a CSPRNG for smb2_random_bytes(). Without one the NTLMv2 client
+ * challenge, SMB 3.1.1 preauth salt, client GUID and per-PDU nonces all
+ * fall back to random() seeded with ~32 bits of guessable material.
+ *
+ * This shim config is the first include of every translation unit and is
+ * also the header search path on Linux (see the smb2-module/apple
+ * symlink), so only compiler-predefined macros can be tested here: a libc
+ * version test (__GLIBC__ comes from <features.h>) is always false at this
+ * point, and pulling <features.h> in early would freeze the feature-test
+ * macros before the sources define _GNU_SOURCE. */
+#if defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
+    defined(__NetBSD__) || defined(__DragonFly__)
+/* These libcs all provide arc4random_buf(). (Darwin since 10.7; the BSDs
+ * forever. Their compilers predefine these macros, so the test works even
+ * though this file is the first include of every translation unit.) */
+#define HAVE_ARC4RANDOM_BUF 1
+#elif defined(__linux__)
+/* getrandom(2) needs no libc version probe on anything a Swift toolchain
+ * ships for (glibc >= 2.25, musl >= 1.1.20); /dev/urandom stays as the
+ * fallback for seccomp filters and old kernels. Bionic only gained the
+ * wrapper in API 28, so Android relies on /dev/urandom alone. */
+#ifndef __ANDROID__
+#define HAVE_SYS_RANDOM_H 1
+#define HAVE_GETRANDOM 1
+#endif
+#define HAVE_DEV_URANDOM 1
+#endif

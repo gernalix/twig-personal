@@ -454,7 +454,7 @@ struct sockaddr_storage {
 
 #ifdef _IOP
 typedef uint32_t UWORD32;
-typedef size_t ssize_t;
+typedef int ssize_t;
 #include <tcpip.h>
 #endif
 
@@ -515,16 +515,21 @@ struct iovec {
 #define connect(a,b,c) iop_connect(a,b,c)
 int iop_connect(int sockfd, struct sockaddr *addr, socklen_t addrlen);
 
-#define write(a,b,c) lwip_send(a,b,c,MSG_DONTWAIT)
-#define read(a,b,c) lwip_recv(a,b,c,MSG_DONTWAIT)
+#define write(a,b,c) iop_write(a,b,c)
+#define read(a,b,c) iop_read(a,b,c)
+int iop_write(int sockfd, const void *buf, size_t len);
+int iop_read(int sockfd, void *buf, size_t len);
 #endif
 
 #ifdef __ps2sdk_iop__
+/* PS2 IRX has no stdlib.h; allocators are provided by smb2man. */
 void *malloc(int size);
 
 void free(void *ptr);
 
 void *calloc(size_t nmemb, size_t size);
+
+void *realloc(void *ptr, size_t size);
 #endif
 
 ssize_t writev(t_socket fd, const struct iovec *iov, int iovcnt);
@@ -647,16 +652,25 @@ ssize_t readv(t_socket fd, const struct iovec *iov, int iovcnt);
 
 #include <sys/types.h>
 
+#if defined(__wii__) || defined(__gamecube__)
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+#endif
+
 #if defined(__3DS__) || defined(__wii__) || defined(__gamecube__) || defined(__WIIU__) || defined(__NDS__)
+#if !defined(HAVE_STRUCT_IOVEC)
 struct iovec {
   void  *iov_base;
   size_t iov_len;
-};	
+};
+#endif
 #if defined(__wii__) || defined(__gamecube__) || defined(__NDS__)
 #ifndef __NDS__
 #include <network.h>
 #endif
 
+#if !defined(HAVE_STRUCT_ADDRINFO)
 struct addrinfo {
 	int	ai_flags;	/* AI_PASSIVE, AI_CANONNAME */
 	int	ai_family;	/* PF_xxx */
@@ -667,6 +681,29 @@ struct addrinfo {
 	struct sockaddr *ai_addr;	/* binary address */
 	struct addrinfo *ai_next;	/* next structure in linked list */
 };
+#endif
+
+#if defined(__wii__) || defined(__gamecube__)
+#if !defined(HAVE_SOCKADDR_STORAGE)
+/*
+ * RFC 2553: protocol-independent placeholder for socket addresses.
+ * libogc's <network.h> has no sockaddr_storage of its own.
+ */
+#define _SS_MAXSIZE     128
+#define _SS_ALIGNSIZE   (sizeof(double))
+#define _SS_PAD1SIZE    (_SS_ALIGNSIZE - sizeof(unsigned short))
+#define _SS_PAD2SIZE    (_SS_MAXSIZE - sizeof(unsigned short) - \
+                            _SS_PAD1SIZE - _SS_ALIGNSIZE)
+
+struct sockaddr_storage {
+    unsigned char  ss_len;
+    unsigned char  ss_family;
+    char    __ss_pad1[_SS_PAD1SIZE];
+    double  __ss_align;
+    char    __ss_pad2[_SS_PAD2SIZE];
+};
+#endif
+#endif
 
 #endif
 #define sockaddr_in6 sockaddr_in
@@ -738,16 +775,41 @@ void smb2_freeaddrinfo(struct addrinfo *res);
 #define freeaddrinfo smb2_freeaddrinfo
 
 #ifndef __NDS__
-#define connect net_connect
-#define socket net_socket 
-#define setsockopt net_setsockopt
-s32 getsockopt(int sockfd, int level, int optname, void *optval, socklen_t *optlen);
-#define select net_select
-#define accept net_accept
-#define listen net_listen
-#define bind net_bind
+int smb2_net_connect(int fd, struct sockaddr *addr, socklen_t addrlen);
+int smb2_net_close(int fd);
+int smb2_net_fcntl(int fd, int cmd, ...);
+ssize_t smb2_net_write(int fd, const void *buf, size_t count);
+ssize_t smb2_net_read(int fd, void *buf, size_t count);
+int smb2_net_socket(int domain, int type, int protocol);
+int smb2_net_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
+int smb2_net_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen);
+int smb2_net_bind(int fd, struct sockaddr *addr, socklen_t addrlen);
+int smb2_net_listen(int fd, int backlog);
+int smb2_net_accept(int fd, struct sockaddr *addr, socklen_t *addrlen);
+int smb2_net_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
+
+#define socket smb2_net_socket
+#define getsockopt smb2_net_getsockopt
+#define setsockopt smb2_net_setsockopt
+#define select smb2_net_select
+#define accept smb2_net_accept
+#define listen smb2_net_listen
+#define bind smb2_net_bind
+#define connect smb2_net_connect
+#define close smb2_net_close
+#define fcntl smb2_net_fcntl
+#define write smb2_net_write
+#define read  smb2_net_read
 #endif
 
+#if defined(__has_include)
+#if __has_include(<poll.h>)
+#include <poll.h>
+#define SMB2_HAVE_OGC_POLL_H 1
+#endif
+#endif
+
+#ifndef SMB2_HAVE_OGC_POLL_H
 struct pollfd {
         int fd;
         short events;
@@ -755,6 +817,7 @@ struct pollfd {
 };
 
 int poll(struct pollfd *fds, unsigned int nfds, int timo);
+#endif
 
 #endif
 
@@ -816,6 +879,10 @@ int getlogin_r(char *buf, size_t size);
 
 #ifndef EINVAL
 #define EINVAL 22
+#endif
+
+#ifndef ECANCELED
+#define ECANCELED 125
 #endif
 
 #ifndef typeof

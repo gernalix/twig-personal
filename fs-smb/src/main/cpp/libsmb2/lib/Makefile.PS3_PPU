@@ -64,7 +64,9 @@ export OFILES	:=	$(CFILES:.c=.o) \
 
 export BINFILES	:=	$(BINFILES:.bin=.bin.h)
 
+# -I$(CURDIR) for the private headers (compat.h, etc.) in lib/.
 export INCLUDES	=	$(foreach dir,$(INCLUDE),-I$(CURDIR)/$(dir)) \
+					-I$(CURDIR) \
 					-I$(CURDIR)/$(BUILD) -I$(PSL1GHT)/ppu/include -I$(PORTLIBS)/include
 
 .PHONY: $(BUILD) install clean shader

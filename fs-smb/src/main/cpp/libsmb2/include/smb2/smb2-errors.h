@@ -36,6 +36,8 @@
 #define SMB2_STATUS_SUCCESS                            0x00000000
 #define SMB2_STATUS_SHUTDOWN                           0xffffffff
 #define SMB2_STATUS_PENDING                            0x00000103
+#define SMB2_STATUS_NOTIFY_CLEANUP                     0x0000010B
+#define SMB2_STATUS_NOTIFY_ENUM_DIR                    0x0000010C
 #define SMB2_STATUS_SMB_BAD_FID                        0x00060001
 #define SMB2_STATUS_NO_MORE_FILES                      0x80000006
 #define SMB2_STATUS_UNSUCCESSFUL                       0xC0000001
@@ -541,6 +543,12 @@
 #define SMB2_STATUS_FILE_IS_OFFLINE                    0xC0000267
 #define SMB2_STATUS_VOLUME_DISMOUNTED                  0xC000026E
 #define SMB2_STATUS_NOT_A_REPARSE_POINT                0xC0000275
+#define SMB2_STATUS_IO_REPARSE_TAG_INVALID             0xC0000276
+#define SMB2_STATUS_IO_REPARSE_TAG_MISMATCH            0xC0000277
+#define SMB2_STATUS_IO_REPARSE_DATA_INVALID            0xC0000278
+#define SMB2_STATUS_IO_REPARSE_TAG_NOT_HANDLED         0xC0000279
+#define SMB2_STATUS_REPARSE_POINT_NOT_RESOLVED         0xC0000280
+#define SMB2_STATUS_DIRECTORY_IS_A_REPARSE_POINT       0xC0000281
 #define SMB2_STATUS_SERVER_UNAVAILABLE                 0xC0000466
 
 /* Warning codes */

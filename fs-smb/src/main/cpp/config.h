@@ -3,6 +3,7 @@
 
 #define HAVE_ARPA_INET_H     1
 #define HAVE_DLFCN_H         1
+#define HAVE_ERRNO_H         1
 #define HAVE_FCNTL_H         1
 #define HAVE_INTTYPES_H      1
 #define HAVE_NETDB_H         1
@@ -20,6 +21,7 @@
 #define HAVE_SYS_TIME_H      1
 #define HAVE_UNISTD_H        1
 #define HAVE_LINGER          1
+#define STDC_HEADERS         1
 
 /* Unused-parameter marker used throughout libsmb2 source */
 #define _U_ __attribute__((unused))

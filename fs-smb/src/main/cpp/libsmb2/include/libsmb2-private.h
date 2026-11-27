@@ -26,12 +26,15 @@ extern "C" {
 #ifdef HAVE_LIBKRB5
 #include <krb5/krb5.h>
 
-#if __APPLE__
-#import <GSS/GSS.h>
+/* Use Apple's GSS.framework only where it actually exists (issue #476);
+ * otherwise fall back to the normal Unix gssapi/gssapi.h codepath, e.g.
+ * when linking against a Heimdal/MIT krb5 install on macOS. */
+#if defined(__APPLE__) && defined(HAVE_GSS_GSS_H)
+#include <GSS/GSS.h>
 #else
 #include <gssapi/gssapi.h>
 #include <gssapi/gssapi_ext.h>
-#endif /* __APPLE__ */
+#endif
 #endif /* HAVE_LIBKRB5 */
 
 #ifndef MIN
@@ -52,6 +55,8 @@ extern "C" {
 
 #define SMB2_SIGNATURE_SIZE 16
 #define SMB2_KEY_SIZE 16
+/* AES-256 encryption keys */
+#define SMB2_ENC_KEY_SIZE_MAX 32
 
 #define SMB2_MAX_VECTORS 256
 
@@ -132,6 +137,23 @@ enum smb2_recv_state {
 #define MAX_CREDITS 1024
 #define SMB2_SALT_SIZE 32
 
+/*
+ * Tri-state for smb2->seal_requested, tracking what the caller asked for
+ * via smb2_set_seal()/the "seal=" URL argument, as distinct from whether
+ * sealing is currently active (smb2->seal):
+ *   SMB2_SEAL_NONE  : caller explicitly disabled encryption (seal=0). Do
+ *                     not advertise SMB2_GLOBAL_CAP_ENCRYPTION at all.
+ *   SMB2_SEAL_MAYBE : default, nobody called smb2_set_seal(). Advertise
+ *                     the capability, but tolerate a server that doesn't
+ *                     support/require it.
+ *   SMB2_SEAL_MUST  : caller explicitly requested encryption (seal=1).
+ *                     Advertise the capability and fail the connection if
+ *                     the server does not also negotiate it.
+ */
+#define SMB2_SEAL_NONE  (-1)
+#define SMB2_SEAL_MAYBE   0
+#define SMB2_SEAL_MUST    1
+
 struct sync_cb_data {
 	int is_finished;
 	int status;
@@ -151,6 +173,20 @@ struct smb2_context {
 
         int timeout;
 
+#ifdef HAVE_LIBQUIC
+        /* "quic" URL argument: SMB2 over QUIC (MS-SMB2 2.1) using the
+         * kernel QUIC module, see quic.c */
+        int quic;
+        int quic_stream_open;
+        struct smb2_quic_handshake *quic_hs;
+#endif
+#ifdef HAVE_LIBRDMACM
+        /* "rdma" URL argument: SMB2 over SMB Direct [MS-SMBD], see
+         * smbdirect.c. smb2->fd is an epoll fd for the RDMA channels. */
+        int rdma;
+        struct smb2_rdma *rdma_conn;
+#endif
+
         enum smb2_sec sec;
 
         uint16_t security_mode;
@@ -159,9 +195,19 @@ struct smb2_context {
 
         enum smb2_negotiate_version version;
 
+        /* The dialects we actually offered in our NEGOTIATE request. The
+         * dialect the server picks has to be one of these, so we need to
+         * remember them to be able to reject a downgrade. Zero count means
+         * we have not sent a negotiate request on this context.
+         */
+        uint16_t offered_dialects[SMB2_NEGOTIATE_MAX_DIALECTS];
+        uint16_t offered_dialect_count;
+
         const char *server;
         const char *share;
         const char *user;
+        /* Server: local account of the Kerberos client, from gss_localname */
+        char *local_user;
 
         /* Only used with --without-libkrb5 */
         const char *password;
@@ -179,6 +225,7 @@ struct smb2_context {
         int credits;
 
         char client_guid[16];
+        char server_guid[16];
 
         uint32_t tree_id[SMB2_MAX_TREE_NESTING];
         int  tree_id_top;
@@ -190,13 +237,23 @@ struct smb2_context {
         uint8_t session_key_size;
 
         uint8_t seal:1;
+        int8_t seal_requested;
         uint8_t sign:1;
+        /* SMB3 encryption keys derived; sealed clients refuse plaintext from here on */
+        uint8_t enc_keys_ready:1;
+        /* server: the client's NEGOTIATE had an encryption context */
+        uint8_t enc_cap_offered:1;
         uint8_t signing_key[SMB2_KEY_SIZE];
-        uint8_t serverin_key[SMB2_KEY_SIZE];
-        uint8_t serverout_key[SMB2_KEY_SIZE];
+        uint8_t application_key[SMB2_KEY_SIZE];
+        uint8_t serverin_key[SMB2_ENC_KEY_SIZE_MAX];
+        uint8_t serverout_key[SMB2_ENC_KEY_SIZE_MAX];
         uint8_t salt[SMB2_SALT_SIZE];
         uint16_t cypher;
         uint8_t preauthhash[SMB2_PREAUTH_HASH_SIZE];
+        /* on the list smb2_active_contexts() returns: a server's context */
+        int on_active_list;
+        /* server: the hash after the negotiate, where every session's starts */
+        uint8_t negotiate_preauthhash[SMB2_PREAUTH_HASH_SIZE];
 
 
 #ifdef HAVE_LIBKRB5
@@ -209,12 +266,32 @@ struct smb2_context {
         unsigned char *enc;
         size_t enc_len;
         int enc_pos;
+        /* How many transform headers deep we currently are. SMB3 never
+         * nests them, so this only ever goes above 1 for a peer that is
+         * trying to recurse us off the end of the stack.
+         */
+        int enc_depth;
 
         /*
          * For sending PDUs
          */
         struct smb2_pdu *outqueue;
         struct smb2_pdu *waitqueue;
+
+        /* Set while the encryption-abort path in smb2_queue_pdu() fires
+         * the aborted chain's callbacks. A callback that queues another
+         * command must not re-enter that path: the new chain is not
+         * fired, and queue_rejected is set so the caller can free its
+         * state and return an error instead of promising a callback. */
+        int in_queue_abort;
+        int queue_rejected;
+
+        /*
+         * Handles the caller has not closed yet; swept by
+         * smb2_destroy_context().
+         */
+        struct smb2fh *fhs;
+        struct smb2dir *dirs;
 
         /*
          * For receiving PDUs
@@ -289,14 +366,43 @@ typedef void (*smb2_free_payload)(struct smb2_context *smb2, void *payload);
 
 #define SMB2_MAX_PDU_SIZE 16*1024*1024
 
+/* headroom over the negotiated read/write size for headers and the transform header */
+#define SMB2_RECV_PDU_SLACK (64 * 1024)
+
+/* cap peer-supplied PDU lengths to the negotiated read/write size, never above SMB2_MAX_PDU_SIZE */
+static inline uint32_t
+smb2_recv_pdu_cap(const struct smb2_context *smb2)
+{
+        uint32_t max = smb2->max_read_size > smb2->max_write_size ?
+                smb2->max_read_size : smb2->max_write_size;
+
+        if (max == 0 || max > SMB2_MAX_PDU_SIZE - SMB2_RECV_PDU_SLACK) {
+                return SMB2_MAX_PDU_SIZE;
+        }
+        return max + SMB2_RECV_PDU_SLACK;
+}
+
 struct smb2_pdu {
         struct smb2_pdu *next;
         struct smb2_header header;
 
         struct smb2_pdu *next_compound;
         uint64_t prev_compound_mid;
+        int unrelated_compound;
 
         int caller_frees_pdu;
+        /*
+         * Set for the negotiate and session setup pdus that take part in
+         * the SMB3.1.1 preauth integrity hash. The hash has to be taken
+         * over the bytes we actually send, so it is done inside
+         * smb2_queue_pdu() once the header is encoded and the pdu is
+         * signed, and before the pdu can be written out and freed.
+         */
+        int update_preauth_hash;
+        /* sign even when the session is not signed (MS-SMB2 3.3.5.15.12) */
+        int must_sign;
+        /* never sign: a reply for a session the server has retired */
+        int never_sign;
         smb2_command_cb cb;
         void *cb_data;
         void (*free_cb)(void *);
@@ -327,6 +433,14 @@ struct smb2_pdu {
         uint8_t info_type;
         uint8_t file_info_class;
 
+        /* Data we need to retain between request/reply for IOCTL, since
+         * some ctl codes report errors using the IOCTL reply format
+         * instead of the generic SMB2 error format.
+         */
+        uint32_t ctl_code;
+        /* this error reply uses the IOCTL reply format */
+        int ioctl_reply_format;
+
         /* For encrypted PDUs */
         uint8_t seal:1;
         uint32_t crypt_len;
@@ -345,9 +459,23 @@ struct smb2dir {
         void *cb_data;
         smb2_file_id file_id;
 
+        /*
+         * For smb2_opendir_async_pdu(): the pdu the caller owns, until the
+         * first callback runs. Freeing the pdu before that cancels the
+         * opendir, which then frees dir and calls cancel_free_cb(cb_data).
+         */
+        struct smb2_pdu *cancel_pdu;
+        void (*cancel_free_cb)(void *);
+
         struct smb2_dirent_internal *entries;
         struct smb2_dirent_internal *current_entry;
         int index;
+
+        /* All open smb2dir are tracked on their context, so
+         * smb2_destroy_context() can free the ones the caller did not
+         * close, as its contract promises. Doubly linked: opendir
+         * cancellation frees the dir without a context to look it up. */
+        struct smb2dir *next, **prev;
 };
 
 
@@ -357,6 +485,42 @@ void smb2_set_nterror(struct smb2_context *smb2, int nterror,
                     const char *error_string, ...);
 
 void smb2_close_connecting_fds(struct smb2_context *smb2);
+
+#ifdef HAVE_LIBQUIC
+#ifndef IPPROTO_QUIC
+#define IPPROTO_QUIC 261
+#endif
+struct iovec;
+int smb2_quic_handshake_start(struct smb2_context *smb2);
+int smb2_quic_server_handshake_start(struct smb2_context *smb2,
+                                     const char *cert_file,
+                                     const char *key_file);
+int smb2_quic_listen(uint16_t port, int max_connections, int *out_fd);
+int smb2_quic_handshake_service(struct smb2_context *smb2);
+int smb2_quic_events(struct smb2_context *smb2);
+ssize_t smb2_quic_writev(struct smb2_context *smb2,
+                         const struct iovec *iov, int iovcnt);
+void smb2_quic_reset(struct smb2_context *smb2);
+#else
+#define smb2_quic_reset(smb2) do { } while (0)
+#endif
+
+#ifdef HAVE_LIBRDMACM
+struct iovec;
+struct addrinfo;
+int smb2_rdma_connect(struct smb2_context *smb2, const struct addrinfo *ai);
+int smb2_rdma_connected(struct smb2_context *smb2);
+int smb2_rdma_service(struct smb2_context *smb2);
+int smb2_rdma_flush_output(struct smb2_context *smb2);
+ssize_t smb2_rdma_writev(struct smb2_context *smb2,
+                         const struct iovec *iov, int iovcnt);
+ssize_t smb2_rdma_readv(struct smb2_context *smb2,
+                        const struct iovec *iov, int iovcnt);
+void smb2_rdma_cap_io_sizes(struct smb2_context *smb2);
+void smb2_rdma_reset(struct smb2_context *smb2);
+#else
+#define smb2_rdma_reset(smb2) do { } while (0)
+#endif
 
 void *smb2_alloc_init(struct smb2_context *smb2, size_t size);
 void *smb2_alloc_data(struct smb2_context *smb2, void *memctx, size_t size);
@@ -381,7 +545,16 @@ int smb2_process_payload_variable(struct smb2_context *smb2,
 int smb2_get_fixed_size(struct smb2_context *smb2, struct smb2_pdu *pdu);
 
 struct smb2_pdu *smb2_find_pdu(struct smb2_context *smb2, uint64_t message_id);
+void smb2_add_active_context(struct smb2_context *smb2);
 void smb2_free_iovector(struct smb2_context *smb2, struct smb2_io_vectors *v);
+
+/*
+ * Fill buf with len random bytes, using the strongest source this platform
+ * offers. Always fills the buffer. Returns 0 if the bytes came from a
+ * cryptographically strong source and -1 if it had to fall back to
+ * random(), for callers that want to know.
+ */
+int smb2_random_bytes(void *buf, size_t len);
 
 void smb2_oplock_break_notify(struct smb2_context *smb2, int status, void *command_data, void *cb_data);
 
@@ -518,10 +691,18 @@ int smb2_process_ioctl_request_fixed(struct smb2_context *smb2,
                              struct smb2_pdu *pdu);
 int smb2_process_ioctl_request_variable(struct smb2_context *smb2,
                                 struct smb2_pdu *pdu);
+int smb2_ioctl_errors_may_use_reply_format(uint32_t ctl_code);
 
 int smb2_decode_file_basic_info(struct smb2_context *smb2,
                                 void *memctx,
                                 struct smb2_file_basic_info *fs,
+                                struct smb2_iovec *vec);
+int smb2_decode_file_attribute_tag_info(struct smb2_context *smb2,
+                                void *memctx,
+                                struct smb2_file_attribute_tag_info *fs,
+                                struct smb2_iovec *vec);
+int smb2_encode_file_attribute_tag_info(struct smb2_context *smb2,
+                                struct smb2_file_attribute_tag_info *fs,
                                 struct smb2_iovec *vec);
 int smb2_encode_file_basic_info(struct smb2_context *smb2,
                                 struct smb2_file_basic_info *fs,
@@ -583,6 +764,10 @@ int smb2_decode_security_descriptor(struct smb2_context *smb2,
                                     void *memctx,
                                     struct smb2_security_descriptor *sd,
                                     struct smb2_iovec *vec);
+int smb2_security_descriptor_size(struct smb2_security_descriptor *sd);
+int smb2_encode_security_descriptor(struct smb2_context *smb2,
+                                    struct smb2_security_descriptor *sd,
+                                    struct smb2_iovec *vec);
 
 int smb2_decode_file_fs_volume_info(struct smb2_context *smb2,
                                     void *memctx,
@@ -640,6 +825,15 @@ int smb2_decode_file_fs_sector_size_info(struct smb2_context *smb2,
 int smb2_encode_file_fs_sector_size_info(struct smb2_context *smb2,
                                      struct smb2_file_fs_sector_size_info *fs,
                                      struct smb2_iovec *vec);
+int smb3_update_preauth_hash(struct smb2_context *smb2, int niov,
+                             struct smb2_iovec *iov);
+int smb2_decode_symlink_error_response(struct smb2_context *smb2,
+                                    void *memctx,
+                                    struct smb2_symlink_error_response *sl,
+                                    struct smb2_iovec *vec);
+int smb2_encode_reparse_data_buffer(struct smb2_context *smb2,
+                                    struct smb2_reparse_data_buffer *rp,
+                                    struct smb2_iovec *vec);
 int smb2_decode_reparse_data_buffer(struct smb2_context *smb2,
                                     void *memctx,
                                     struct smb2_reparse_data_buffer *rp,
@@ -649,19 +843,16 @@ int smb2_read_from_buf(struct smb2_context *smb2);
 void smb2_change_events(struct smb2_context *smb2, t_socket fd, int events);
 void smb2_timeout_pdus(struct smb2_context *smb2);
 
-struct dcerpc_context;
-int dcerpc_set_uint8(struct dcerpc_context *ctx, struct smb2_iovec *iov,
-                     int *offset, uint8_t value);
-
-struct dcerpc_pdu;
-int dcerpc_pdu_direction(struct dcerpc_pdu *pdu);
-
-int dcerpc_align_3264(struct dcerpc_context *ctx, int offset);
-
 struct connect_data;                                           /* defined in libsmb2.c */
 void free_c_data(struct smb2_context*, struct connect_data*);  /* defined in libsmb2.c */
 
 int smb2_write_to_socket(struct smb2_context *smb2);
+
+/* Free a handle/dir and unlink it from its context's sweep list.
+ * smb2 may be NULL (cancellation paths unlink through the embedded
+ * back-pointers). Defined in libsmb2.c. */
+void free_smb2fh(struct smb2_context *smb2, struct smb2fh *fh);
+void free_smb2dir(struct smb2_context *smb2, struct smb2dir *dir);
         
 #ifdef __cplusplus
 }

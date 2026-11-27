@@ -231,7 +231,7 @@ smb2_process_session_setup_fixed(struct smb2_context *smb2,
                 return -1;
         }
 
-        rep = malloc(sizeof(*rep));
+        rep = calloc(1, sizeof(*rep));
         if (rep == NULL) {
                 smb2_set_error(smb2, "Failed to allocate session setup reply");
                 return -1;
@@ -242,7 +242,8 @@ smb2_process_session_setup_fixed(struct smb2_context *smb2,
         smb2_get_uint16(iov, 4, &rep->security_buffer_offset);
         smb2_get_uint16(iov, 6, &rep->security_buffer_length);
         if (rep->security_buffer_length &&
-            (rep->security_buffer_offset + rep->security_buffer_length > (uint16_t)smb2->spl)) {
+            ((uint32_t)rep->security_buffer_offset +
+             rep->security_buffer_length > smb2->spl)) {
                 smb2_set_error(smb2, "Security buffer extends beyond end of "
                                "PDU");
                 pdu->payload = NULL;
@@ -300,7 +301,7 @@ smb2_process_session_setup_request_fixed(struct smb2_context *smb2,
                 return -1;
         }
 
-        req = malloc(sizeof(*req));
+        req = calloc(1, sizeof(*req));
         if (req == NULL) {
                 smb2_set_error(smb2, "Failed to allocate session setup request");
                 return -1;
@@ -313,7 +314,11 @@ smb2_process_session_setup_request_fixed(struct smb2_context *smb2,
         smb2_get_uint32(iov, 8, &req->channel);
 /*        smb2_get_uint16(iov, 12, &req->security_buffer_offset); */
         smb2_get_uint16(iov, 14, &req->security_buffer_length);
-        smb2_get_uint64(iov, 18, &req->previous_session_id);
+        /* PreviousSessionId is at offset 16, which is also where
+         * smb2_encode_session_setup_request() writes it. Reading it at 18
+         * ran off the end of the 24 byte structure and left it unset.
+         */
+        smb2_get_uint64(iov, 16, &req->previous_session_id);
 
         return req->security_buffer_length;
 }

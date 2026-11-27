@@ -24,6 +24,7 @@ extern "C" {
 #endif
 
 #define LIBSMB2_SHARE_ENUM_V2 1
+#define LIBSMB2_SRVSVC_V2 1
 
 struct smb2_iovec {
         uint8_t *buf;
@@ -65,6 +66,14 @@ typedef void (*smb2_client_connection)(struct smb2_context *smb2, void *cb_data)
  */
 struct smb2_oplock_or_lease_break_reply;
 
+/*
+ * An smb2_oplock_or_lease_break_cb callback can store this in
+ * *new_lease_state to stop libsmb2 acknowledging a lease break itself.
+ * The app must then send the acknowledgement explicitly with
+ * smb2_cmd_lease_break_async().
+ */
+#define SMB2_LEASE_STATE_NO_AUTO_ACK 0xFFFFFFFFu
+
 typedef void (*smb2_oplock_or_lease_break_cb)(struct smb2_context *smb2,
            int status,
            struct smb2_oplock_or_lease_break_reply *rep,
@@ -75,6 +84,14 @@ typedef void (*smb2_oplock_or_lease_break_cb)(struct smb2_context *smb2,
 #define SMB2_TYPE_FILE      0x00000000
 #define SMB2_TYPE_DIRECTORY 0x00000001
 #define SMB2_TYPE_LINK      0x00000002
+/*
+ * The types below are only ever reported for the reparse points that
+ * WSL uses to store non-regular files on a windows filesystem.
+ */
+#define SMB2_TYPE_FIFO      0x00000003
+#define SMB2_TYPE_CHARDEV   0x00000004
+#define SMB2_TYPE_BLOCKDEV  0x00000005
+#define SMB2_TYPE_SOCKET    0x00000006
 struct smb2_stat_64 {
         uint32_t smb2_type;
         uint32_t smb2_nlink;
@@ -88,6 +105,18 @@ struct smb2_stat_64 {
         uint64_t smb2_ctime_nsec;
         uint64_t smb2_btime;
         uint64_t smb2_btime_nsec;
+        /*
+         * The raw windows attributes for this file, a mask of
+         * SMB2_FILE_ATTRIBUTE_*.
+         */
+        uint32_t smb2_attributes;
+        /*
+         * If SMB2_FILE_ATTRIBUTE_REPARSE_POINT is set in smb2_attributes
+         * this is the reparse tag, one of SMB2_REPARSE_TAG_*.
+         * It is 0 both for files that are not reparse points and for the
+         * servers that do not tell us the tag.
+         */
+        uint32_t smb2_reparse_tag;
 };
 
 struct smb2_statvfs {
@@ -128,6 +157,20 @@ typedef SOCKET t_socket;
 #define T_SOCKET_DEFINED
 typedef int t_socket;
 #endif
+/*
+ * fd_set is used by the smb2_server extra_fdset/extra_service hooks below.
+ * Not every toolchain we support has <sys/select.h>; the PS2 IOP one
+ * declares fd_set in <ps2ip.h> instead.
+ */
+#if defined(__PS2__) && !defined(_EE)
+#include <ps2ip.h>
+#elif defined(__has_include)
+#if __has_include(<sys/select.h>)
+#include <sys/select.h>
+#endif
+#else
+#include <sys/select.h>
+#endif
 #endif
 
 /*
@@ -159,13 +202,15 @@ void smb2_close_context(struct smb2_context *smb2);
 void smb2_destroy_context(struct smb2_context *smb2);
 
 /*
- * Get the list of currently allocated contexts
+ * Get the list of the contexts smb2_serve_port() has accepted and not yet
+ * destroyed. Client contexts are not on it.
  */
 struct smb2_context *smb2_active_contexts(void);
 
 /*
- * Determine of the context is currently active.  This lets
- * code know if the context was destroyed in a callback for example
+ * Is this context on the smb2_active_contexts() list, i.e. a context
+ * smb2_serve_port() accepted that has not been destroyed yet? Always 0 for
+ * a client context.
  */
 int smb2_context_active(struct smb2_context *smb2);
 
@@ -316,7 +361,7 @@ void smb2_set_version(struct smb2_context *smb2,
 /*
  * Sets which version libsmb2 uses.
 */
-#define LIBSMB2_MAJOR_VERSION 4
+#define LIBSMB2_MAJOR_VERSION 7
 #define LIBSMB2_MINOR_VERSION 0
 #define LIBSMB2_PATCH_VERSION 0
 
@@ -340,6 +385,23 @@ void smb2_get_libsmb2Version(struct smb2_libversion *smb2_ver);
 uint16_t smb2_get_dialect(struct smb2_context *smb2);
 
 /*
+ * Gets the NDR transfer syntax selected with the ndr3264/ndr32/ndr64
+ * URL arguments, for use by DCE/RPC layers such as libdcerpc.
+ *  0 : offer both NDR32 and NDR64 (default)
+ *  1 : NDR32 only
+ *  2 : NDR64 only
+ */
+int smb2_get_ndr(struct smb2_context *smb2);
+
+/*
+ * Gets the DCE/RPC data representation selected with the le/be URL
+ * arguments.
+ *  0 : little endian (default)
+ *  1 : big endian
+ */
+int smb2_get_endianness(struct smb2_context *smb2);
+
+/*
  * Set the security mode for the connection.
  * This is a combination of the flags SMB2_NEGOTIATE_SIGNING_ENABLED
  * and  SMB2_NEGOTIATE_SIGNING_REQUIRED
@@ -349,8 +411,17 @@ void smb2_set_security_mode(struct smb2_context *smb2, uint16_t security_mode);
 
 /*
  * Set whether smb3 encryption should be used or not.
- * 0  : disable encryption. This is the default.
- * !0 : enable encryption.
+ *
+ * If this function is never called, the client still advertises support
+ * for encryption during negotiate, but tolerates a server that doesn't
+ * support/require it; a share that mandates encryption is still used
+ * transparently. Calling this function makes the request explicit:
+ *
+ * 0  : never advertise or use encryption, even if the server or a share
+ *      requires it (the connection/tree-connect will then fail against
+ *      a server/share that mandates encryption).
+ * !0 : require encryption. The connection fails if the server does not
+ *      also negotiate it.
  */
 void smb2_set_seal(struct smb2_context *smb2, int val);
 
@@ -365,6 +436,7 @@ enum smb2_sec {
         SMB2_SEC_UNDEFINED = 0,
         SMB2_SEC_NTLMSSP,
         SMB2_SEC_KRB5,
+        SMB2_SEC_IAKERB,
 };
 
 /*
@@ -372,6 +444,13 @@ enum smb2_sec {
  * SMB2_SEC_UNDEFINED (use KRB if available or NTLM if not)
  * SMB2_SEC_NTLMSSP
  * SMB2_SEC_KRB5
+ * SMB2_SEC_IAKERB
+ *     IAKerb (Initial and Pass-Through Authentication Using Kerberos).
+ *     The client builds the Kerberos exchange locally and the SMB server
+ *     proxies it to a KDC the client cannot reach. The domain is the
+ *     Kerberos realm. The password is required, as for sec=krb5cc.
+ *     URL query: sec=iakerb
+ *     smb2_set_authentication(SMB2_SEC_IAKERB) selects the same path.
  */
 void smb2_set_authentication(struct smb2_context *smb2, int val);
 
@@ -386,6 +465,13 @@ void smb2_set_user(struct smb2_context *smb2, const char *user);
  * returns NULL if none
  */
 const char *smb2_get_user(struct smb2_context *smb2);
+
+/*
+ * Server: the local account a Kerberos client's principal maps to, as
+ * krb5's auth_to_local rules and localauth plugins (sssd, winbind) say.
+ * returns NULL for NTLMSSP sessions or when the principal has no mapping.
+ */
+const char *smb2_get_local_user(struct smb2_context *smb2);
 
 /*
  * Set the password that we will try to authenticate as.
@@ -480,6 +566,21 @@ void smb2_set_client_guid(struct smb2_context *smb2, const uint8_t guid[SMB2_GUI
  */
 const char *smb2_get_client_guid(struct smb2_context *smb2);
 
+/*
+ * Returns the server_guid for this context.
+ */
+const char *smb2_get_server_guid(struct smb2_context *smb2);
+
+/*
+ * Copies the application key of the session to key: Session.ApplicationKey
+ * of [MS-SMB2] 3.2.5.3.1, which DCE/RPC over a named pipe uses as its
+ * session key, e.g. to encrypt the password buffers of SAMR.
+ *
+ * Returns 0 on success, or -EINVAL if there is no logged-on session with
+ * a session key.
+ */
+int smb2_get_application_key(struct smb2_context *smb2, uint8_t key[16]);
+        
 /*
  * Asynchronous call to connect a TCP connection to the server
  *
@@ -643,6 +744,21 @@ void smb2_destroy_url(struct smb2_url *url);
  */
 void smb2_add_compound_pdu(struct smb2_context *smb2,
                            struct smb2_pdu *pdu, struct smb2_pdu *next_pdu);
+
+/*
+ * Like smb2_add_compound_pdu() but does NOT set
+ * SMB2_FLAGS_RELATED_OPERATIONS on next_pdu. Use this when chaining
+ * independent requests to different files in one compound packet
+ * (unrelated compounding, MS-SMB2 3.2.4.1.4). smb2_add_compound_pdu()
+ * sets SMB2_FLAGS_RELATED_OPERATIONS which tells the server to use the
+ * file handle from the previous response -- correct for related chains
+ * (CREATE->QUERY->CLOSE on the same file) but causes STATUS_FILE_CLOSED
+ * when used for independent operations on different files.
+ */
+void smb2_add_unrelated_compound_pdu(struct smb2_context *smb2,
+                                     struct smb2_pdu *pdu,
+                                     struct smb2_pdu *next_pdu);
+
 void smb2_free_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu);
 void smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu);
 
@@ -657,6 +773,19 @@ void smb2_set_pdu_message_id(struct smb2_context *smb2, struct smb2_pdu *pdu, ui
 uint64_t smb2_get_pdu_message_id(struct smb2_context *smb2, struct smb2_pdu *pdu);
 uint64_t smb2_get_last_request_message_id(struct smb2_context *smb2);
 uint64_t smb2_get_last_reply_message_id(struct smb2_context *smb2);
+/*
+ * The tree id of the request being handled, 0 if it is an async request
+ * (which names no tree), and its async id, 0 if it is not async. A
+ * CANCEL of a request that got STATUS_PENDING names it by async id.
+ */
+uint32_t smb2_get_last_request_tree_id(struct smb2_context *smb2);
+uint64_t smb2_get_last_request_async_id(struct smb2_context *smb2);
+/*
+ * The async id of the outstanding request with this message id: the one
+ * a server gave it with its STATUS_PENDING reply, or a client got for it
+ * in one. 0 if there is no such request or it is not async.
+ */
+uint64_t smb2_get_async_id(struct smb2_context *smb2, uint64_t message_id);
 int smb2_pdu_is_compound(struct smb2_context *smb2);
 
 /*
@@ -672,7 +801,7 @@ struct smb2dir;
  *          through the callback function.
  *          The pdu must be freed by smb2_free_pdu().
  *          The pdu can be cancelled before the callback is invoked by freeing
- *          it.
+ *          it. free_cb, if not NULL, is then called with cb_data.
  * NULL :   There was an error. The callback function will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
@@ -695,7 +824,7 @@ struct smb2dir *smb2_opendir(struct smb2_context *smb2, const char *path);
 
 int smb2_opendir_async(struct smb2_context *smb2, const char *path,
                        smb2_command_cb cb, void *cb_data);
-        
+
 /*
  * closedir()
  */
@@ -750,7 +879,7 @@ struct smb2fh;
  *          through the callback function.
  *          The pdu must be freed by smb2_free_pdu().
  *          The pdu can be cancelled before the callback is invoked by freeing
- *          it.
+ *          it. free_cb, if not NULL, is then called with cb_data.
  * NULL :   There was an error. The callback function will not be invoked.
  *
  * Opens or creates a file.
@@ -772,14 +901,14 @@ struct smb2fh;
 struct smb2_pdu *
 smb2_open_async_pdu(struct smb2_context *smb2, const char *path, int flags,
                     smb2_command_cb cb, void *cb_data, void (*free_cb)(void *));
-        
+
 /*
  * Returns
  *  0     : The operation was initiated. Result of the operation will be
  *          reported through the callback function.
  * -errno : There was an error. The callback function will not be invoked.
  *
- */  
+ */
 int smb2_open_async_with_oplock_or_lease(struct smb2_context *smb2, const char *path, int flags,
                     uint8_t oplock_level, uint32_t lease_state, smb2_lease_key lease_key,
                     smb2_command_cb cb, void *cb_data);
@@ -1165,7 +1294,72 @@ int smb2_rename_async(struct smb2_context *smb2, const char *oldpath,
  * Sync rename()
  */
 int smb2_rename(struct smb2_context *smb2, const char *oldpath,
+                const char *newpath);
+
+/*
+ * Async link()
+ *
+ * Returns
+ *  0     : The operation was initiated. Result of the operation will be
+ *          reported through the callback function.
+ * -errno : There was an error. The callback function will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ *      0 : Success.
+ * -errno : An error occurred.
+ */
+int smb2_link_async(struct smb2_context *smb2, const char *oldpath,
+                    const char *newpath, smb2_command_cb cb, void *cb_data);
+
+/*
+ * Sync link()
+ */
+int smb2_link(struct smb2_context *smb2, const char *oldpath,
               const char *newpath);
+
+/*
+ * Flags for smb2_symlink()
+ */
+/*
+ * Create a link to a directory. Windows symlinks are typed and a link to
+ * a directory must be created as one, so unlike posix we have to be told
+ * which kind of link the caller wants.
+ */
+#define SMB2_SYMLINK_DIRECTORY 0x00000001
+/*
+ * Treat the target as an absolute path on the server instead of one
+ * relative to the directory the link lives in. By default a target that
+ * starts with a drive letter or a path separator is taken as absolute
+ * and everything else as relative, which is usually what you want.
+ */
+#define SMB2_SYMLINK_ABSOLUTE  0x00000002
+
+/*
+ * Async symlink()
+ *
+ * Creates a symlink at linkpath that points at target.
+ * Note that windows servers normally only allow this for accounts that
+ * hold SeCreateSymbolicLinkPrivilege, which is administrators only, and
+ * the share must have been created without restrictions on symlinks.
+ *
+ * Returns
+ *  0     : The operation was initiated. Result of the operation will be
+ *          reported through the callback function.
+ * -errno : There was an error. The callback function will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ *      0 : Success.
+ * -errno : An error occurred.
+ */
+int smb2_symlink_async(struct smb2_context *smb2, const char *target,
+                       const char *linkpath, uint32_t flags,
+                       smb2_command_cb cb, void *cb_data);
+
+/*
+ * Sync symlink()
+ */
+int smb2_symlink(struct smb2_context *smb2, const char *target,
+                 const char *linkpath, uint32_t flags);
 
 /*
  * Async truncate()
@@ -1238,6 +1432,96 @@ int smb2_readlink_async(struct smb2_context *smb2, const char *path,
 int smb2_readlink(struct smb2_context *smb2, const char *path, char *buf, uint32_t bufsiz);
 
 /*
+ * SERVER-SIDE COPY
+ */
+/*
+ * Async request-resume-key.
+ *
+ * Returns
+ *  0     : The operation was initiated. The resume key will be reported
+ *          through the callback function.
+ * -errno : There was an error. The callback function will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ *      0 : Success. Command_data is struct smb2_srv_copychunk_resume_key *.
+ *          This structure must be freed using smb2_free_data().
+ * -errno : An error occurred.
+ */
+int smb2_request_resume_key_async(struct smb2_context *smb2, struct smb2fh *fh,
+                                  smb2_command_cb cb, void *cb_data);
+
+/*
+ * Sync request-resume-key()
+ */
+int smb2_request_resume_key(struct smb2_context *smb2, struct smb2fh *fh,
+                            struct smb2_srv_copychunk_resume_key *resume_key);
+
+/*
+ * Async copychunk.
+ *
+ * Returns
+ *  0     : The operation was initiated. The copy result will be reported
+ *          through the callback function.
+ * -errno : There was an error. The callback function will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ *      0 : Success. Command_data is struct smb2_srv_copychunk_reply *.
+ *          This structure must be freed using smb2_free_data().
+ * -errno : An error occurred. For server replies that include copy limits,
+ *          command_data may still be struct smb2_srv_copychunk_reply * and
+ *          must be freed using smb2_free_data().
+ */
+int smb2_copychunk_async(struct smb2_context *smb2,
+                         uint32_t ctl_code,
+                         const struct smb2_srv_copychunk_resume_key *resume_key,
+                         struct smb2fh *dstfh,
+                         const struct smb2_srv_copychunk *chunks,
+                         uint32_t chunk_count,
+                         smb2_command_cb cb, void *cb_data);
+
+/*
+ * Sync copychunk(). If the server returns copy-limit information together
+ * with an error status, reply is populated before the error is returned.
+ */
+int smb2_copychunk(struct smb2_context *smb2,
+                   uint32_t ctl_code,
+                   const struct smb2_srv_copychunk_resume_key *resume_key,
+                   struct smb2fh *dstfh,
+                   const struct smb2_srv_copychunk *chunks,
+                   uint32_t chunk_count,
+                   struct smb2_srv_copychunk_reply *reply);
+
+/*
+ * Async server-side copy helper. This requests a resume key for srcfh and
+ * issues a copychunk request to dstfh using the provided chunk array.
+ *
+ * When the callback is invoked, status indicates the result:
+ *      0 : Success. Command_data is struct smb2_srv_copychunk_reply *.
+ *          This structure must be freed using smb2_free_data().
+ * -errno : An error occurred. For server replies that include copy limits,
+ *          command_data may still be struct smb2_srv_copychunk_reply * and
+ *          must be freed using smb2_free_data().
+ */
+int smb2_server_side_copy_async(struct smb2_context *smb2,
+                                uint32_t ctl_code,
+                                struct smb2fh *srcfh, struct smb2fh *dstfh,
+                                const struct smb2_srv_copychunk *chunks,
+                                uint32_t chunk_count,
+                                smb2_command_cb cb, void *cb_data);
+
+/*
+ * Sync server-side copy helper. If the server returns copy-limit information
+ * together with an error status, reply is populated before the error is
+ * returned.
+ */
+int smb2_server_side_copy(struct smb2_context *smb2,
+                          uint32_t ctl_code,
+                          struct smb2fh *srcfh, struct smb2fh *dstfh,
+                          const struct smb2_srv_copychunk *chunks,
+                          uint32_t chunk_count,
+                          struct smb2_srv_copychunk_reply *reply);
+
+/*
  * Async echo()
  *
  * Returns
@@ -1267,6 +1551,11 @@ free_smb2_file_notify_change_information(struct smb2_context *smb2, struct smb2_
 int smb2_notify_change_async(struct smb2_context *smb2, const char *path, uint16_t flags, uint32_t filter, int loop,
                        smb2_command_cb cb, void *cb_data);
 
+/*
+ * As smb2_notify_change_async() but on a directory handle the caller has
+ * opened. The handle stays the caller's: it is not closed when the watch
+ * ends, and the caller must not close it while a watch is outstanding.
+ */
 int smb2_notify_change_filehandle_async(struct smb2_context *smb2, struct smb2fh *smb2_dir_fh, uint16_t flags, uint32_t filter, int loop,
                        smb2_command_cb cb, void *cb_data);
 
@@ -1299,9 +1588,27 @@ const char *smb2_utf16_to_utf8(const uint16_t *str, size_t len);
 struct smb2_server;
 
 /* pdu handlers in general take the request from the client, and return
- * < 0  on error, and the library should create an error reply
+ * < 0  on error, and the library replies with STATUS_NOT_IMPLEMENTED
  * == 0 on OK, and the library should use the reply struct (if needed) to create a reply
  * > 0  if the handler created and queued a reply itself
+ *
+ * A handler that queues its own reply has to give it the request's
+ * message id, smb2_set_pdu_message_id(smb2, pdu,
+ * smb2_get_last_request_message_id(smb2)), or the reply is dropped.
+ * Queueing the reply frees the request: the handler must not touch req,
+ * or anything it points to, after that. A handler that replies later
+ * keeps req valid until then, but has to save that message id now.
+ * Pointers into the received data (a create's create_context, an
+ * ioctl's input outside FSCTL_VALIDATE_NEGOTIATE_INFO) are only valid
+ * during the call.
+ *
+ * Ioctl input and output buffers are only passed through for
+ * FSCTL_PIPE_TRANSCEIVE, or for any ioctl when the context runs in
+ * passthrough mode (smb2_set_passthrough()).
+ *
+ * cancel_cmd is told of a CANCEL (smb2_get_last_request_message_id()
+ * is the id of the request to cancel). A CANCEL has no reply of its
+ * own, and the library frees it once cancel_cmd returns.
  */
 struct smb2_server_request_handlers {
         int (*destruction_event)(struct smb2_server *srvr, struct smb2_context *smb2);
@@ -1336,6 +1643,11 @@ struct smb2_server_request_handlers {
                             struct smb2_lease_break_acknowledgement *req);
         int (*lock_cmd)(struct smb2_server *srvr, struct smb2_context *smb2,
                             struct smb2_lock_request *req);
+        /*
+         * Return 0 on success (rep filled), <0 on error, >0 to defer the
+         * reply (handler will later queue smb2_cmd_*_reply_async itself
+         * with the original request message id).
+         */
         int (*ioctl_cmd)(struct smb2_server *srvr, struct smb2_context *smb2,
                             struct smb2_ioctl_request *req,
                             struct smb2_ioctl_reply *rep);
@@ -1381,6 +1693,39 @@ struct smb2_server {
         char keytab_path[256];
         char error[128];
         void *auth_data;
+        /*
+         * Optional hooks so applications can fold extra sockets into
+         * smb2_serve_port()'s select loop (e.g. dcerpcd control UDS).
+         * extra_fdset: add FDs to rfds/wfds and update *maxfd.
+         * extra_service: handle ready FDs after the SMB clients.
+         */
+        void (*extra_fdset)(struct smb2_server *server,
+                            fd_set *rfds, fd_set *wfds, int *maxfd);
+        void (*extra_service)(struct smb2_server *server,
+                              fd_set *rfds, fd_set *wfds);
+        /*
+         * Set this from another thread, an RTOS task or a signal handler
+         * to make smb2_serve_port() finish its current pass through the
+         * loop, tear the connections down and return 0. Without it there
+         * is no way to stop the server short of killing the process.
+         */
+        volatile int stop_requested;
+        /*
+         * Set by smb2_serve_port() once the listening socket is bound and
+         * listening, and cleared again when it returns, so that whoever
+         * started the server can tell when it is actually reachable
+         * instead of having to sleep and hope.
+         */
+        volatile int listener_ready;
+        /*
+         * SMB2 over QUIC instead of TCP, when built with libquic: listen
+         * on UDP port "port", 443 if 0. quic_cert_file is the PEM
+         * certificate chain the server presents, quic_key_file its PEM
+         * private key.
+         */
+        int quic;
+        char quic_cert_file[256];
+        char quic_key_file[256];
 };
 
 int smb2_bind_and_listen(const uint16_t port, const int max_connections, int *out_fd);
@@ -1397,11 +1742,10 @@ int smb2_serve_port_async(const int fd, const int to_msecs, struct smb2_context 
 int smb2_serve_port(struct smb2_server *server, const int max_connections, smb2_client_connection cb, void *cb_data);
 
 /*
- * Some symbols have moved over to a different header file to allow better
- * separation between dcerpc and smb2, so we need to include this header
- * here to retain compatibility for apps that depend on those symbols.
+ * Share enum (NetrShareEnum levels 0/1/2) is provided by libsmb2.
+ * Full DCE/RPC lives in libdcerpc (see the dcerpc/ headers).
  */
-#include <smb2/libsmb2-dcerpc-srvsvc.h>
+#include <smb2/libsmb2-share-enum.h>
 
 #ifdef __cplusplus
 }

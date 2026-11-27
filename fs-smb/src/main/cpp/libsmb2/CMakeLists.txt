@@ -29,9 +29,9 @@ if(NOT ESP_PLATFORM)
   else()
     project(libsmb2
             LANGUAGES C
-            VERSION 6.1.0
+            VERSION 7.0.0
     )  
-    set(VERSION 6.1.0)
+    set(VERSION 7.0.0)
     set(PACKAGE "libsmb2")
     set(PACKAGE_BUGREPORT "ronniesahlberg@gmail.com")
     set(PACKAGE_NAME "libsmb2")
@@ -44,7 +44,7 @@ if(NOT ESP_PLATFORM)
 endif()
 
   if(NOT ESP_PLATFORM)
-    set(SOVERSION 1 CACHE STRING "" FORCE)
+    set(SOVERSION 7 CACHE STRING "" FORCE)
     if(NOT IOP AND NOT BUILD_IRX)
       set(INSTALL_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib${LIB_SUFFIX}" CACHE PATH "Installation directory for libraries")
       set(INSTALL_INC_DIR "${CMAKE_INSTALL_PREFIX}/include" CACHE PATH "Installation directory for headers")
@@ -57,19 +57,150 @@ endif()
       option(BUILD_SHARED_LIBS "Build shared libraries" ON)
     endif()
       option(ENABLE_EXAMPLES "Build example programs" OFF)
+      # The utilities need a hosted POSIX system (poll.h, a full libc), so
+      # only build them by default there: not on Windows, the consoles or
+      # the embedded targets.
+      if(CMAKE_SYSTEM_NAME MATCHES "^(Linux|Darwin|.*BSD|DragonFly|SunOS|Solaris|Android)$"
+         AND NOT PS4 AND NOT PICO_BOARD)
+        set(ENABLE_UTILS_DEFAULT ON)
+      else()
+        set(ENABLE_UTILS_DEFAULT OFF)
+      endif()
+      option(ENABLE_UTILS "Build and install the utilities" ${ENABLE_UTILS_DEFAULT})
       option(ENABLE_LIBKRB5 "Enable libkrb5 support" ON)
       option(ENABLE_GSSAPI "Enable gssapi support" ON)
       list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
   endif()
 
-  if(CMAKE_SYSTEM_NAME MATCHES Linux)
-    if (ENABLE_LIBKRB5)
-      find_package(LibKrb5)
+  # Full DCE/RPC is a separate project (libdcerpc/) with its own version
+  # and releases. It is Linux and FreeBSD only for now, and can never be
+  # built on Windows since its symbols collide with Microsoft RPC.
+  if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|FreeBSD)$" OR ESP_PLATFORM OR PICO_BOARD OR IOP OR BUILD_IRX)
+    set(ENABLE_LIBDCERPC OFF)
+  else()
+    option(ENABLE_LIBDCERPC "Build libdcerpc (full DCE/RPC; depends on libsmb2)" ON)
+    if(ENABLE_LIBDCERPC)
+      message(STATUS "Build libdcerpc (full DCE/RPC interfaces)")
+    else()
+      message(STATUS "libdcerpc disabled")
     endif()
-  elseif(IOS)
-    if (ENABLE_GSSAPI)
-      find_package(GSSAPI)  
+
+    # Only libdcerpc's coders and server runtime, without libsmb2: for a
+    # project that has libsmb2 as a submodule to get at libdcerpc, such as
+    # ksmbd-tools through meson's cmake module.
+    option(LIBDCERPC_ONLY "Build only libdcerpc, without the libsmb2 transport" OFF)
+    if(LIBDCERPC_ONLY)
+      set(WITH_LIBSMB2 OFF CACHE BOOL "" FORCE)
+      add_subdirectory(libdcerpc)
+      return()
     endif()
+  endif()
+
+  # Kerberos. On Apple with GSS.framework, link only that framework (and
+  # Kerberos.framework); see the block below for why the two paths must
+  # not mix. Otherwise we use gss_* symbols from gssapi_krb5 and krb5_*
+  # symbols from krb5 directly (gssapi_krb5 only imports the latter, it
+  # does not define them). FindGSSAPI links krb5 too whenever it can
+  # find it separately, same as the autotools build; see its comments
+  # for why that's best-effort rather than required.
+  #
+  # This used to be probed on linux only, with ios looking for gssapi
+  # instead, so on macos and the BSDs the header check in ConfigureChecks
+  # still compiled the kerberos code in and then there was nothing to link
+  # it against. That is issue #413. It went unnoticed on linux because an
+  # ELF shared library may carry undefined symbols, while the macos linker
+  # refuses them.
+  if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin|.*BSD|Solaris|Android" OR IOS)
+    if(ENABLE_LIBKRB5 OR ENABLE_GSSAPI)
+      set(_SMB2_GSS_FRAMEWORK FALSE)
+      if(APPLE)
+        include(CheckIncludeFile)
+        check_include_file("GSS/GSS.h" HAVE_GSS_GSS_H)
+        if(HAVE_GSS_GSS_H)
+          set(_SMB2_GSS_FRAMEWORK TRUE)
+        endif()
+      endif()
+      if(_SMB2_GSS_FRAMEWORK)
+        # When GSS.framework is what we compile against, link *only* the
+        # framework (and Kerberos.framework for the krb5_* API), never
+        # -lgssapi_krb5/-lkrb5. Those plain library names are found by
+        # searching the whole library path, so on a system with a
+        # package manager (MacPorts, Homebrew, ...) they can just as
+        # easily resolve to a completely unrelated MIT/Heimdal krb5
+        # install as to Apple's own. That wouldn't just be untidy: it
+        # would run code compiled against GSS.framework's header (and
+        # gated on GSS.framework's specific limitations, e.g. no
+        # gss_set_neg_mechs, no s4u2self proxy credentials) against a
+        # different implementation that doesn't actually share those
+        # limitations. Frameworks are found via the framework search
+        # path, not -L, so this keeps header and implementation
+        # guaranteed to match, regardless of what else the library
+        # search path turns up.
+        set(core_DEPENDS "-framework GSS" "-framework Kerberos" CACHE STRING "" FORCE)
+      else()
+        find_package(GSSAPI)
+        if(GSSAPI_FOUND)
+          set(core_DEPENDS ${GSSAPI_LIBRARIES} CACHE STRING "" FORCE)
+        else()
+          # Compiling the kerberos paths in when there is no library to link
+          # them against only moves the failure to link time, so build
+          # without kerberos instead.
+          message(STATUS "gssapi_krb5 not found, building without Kerberos")
+          set(ENABLE_LIBKRB5 OFF)
+          set(ENABLE_GSSAPI OFF)
+        endif()
+      endif()
+    endif()
+  endif()
+
+  # SMB2 over QUIC (the "quic" URL argument) uses the Linux kernel QUIC module for
+  # the transport and libquic (on top of gnutls) for the TLS 1.3
+  # handshake, so it is Linux only. Built in when libquic is found.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT (ESP_PLATFORM OR PICO_BOARD OR IOP OR BUILD_IRX))
+    option(ENABLE_LIBQUIC "Enable SMB2 over QUIC (needs libquic)" ON)
+    if(ENABLE_LIBQUIC)
+      find_path(LIBQUIC_INCLUDE_DIR netinet/quic.h)
+      find_library(LIBQUIC_LIBRARY quic)
+      find_library(GNUTLS_LIBRARY gnutls)
+      if(LIBQUIC_INCLUDE_DIR AND LIBQUIC_LIBRARY AND GNUTLS_LIBRARY)
+        message(STATUS "Build with SMB2 over QUIC support")
+        set(HAVE_LIBQUIC 1)
+        list(APPEND core_DEPENDS ${LIBQUIC_LIBRARY} ${GNUTLS_LIBRARY})
+      else()
+        message(STATUS "libquic not found, building without SMB2 over QUIC")
+      endif()
+    endif()
+  endif()
+
+  # SMB2 over SMB Direct (the "rdma" URL argument) uses librdmacm and
+  # libibverbs from rdma-core, Linux only. Built in when they are found.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT (ESP_PLATFORM OR PICO_BOARD OR IOP OR BUILD_IRX))
+    option(ENABLE_RDMA "Enable SMB Direct (needs librdmacm and libibverbs)" ON)
+    if(ENABLE_RDMA)
+      find_path(RDMACM_INCLUDE_DIR rdma/rdma_cma.h)
+      find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+      find_library(RDMACM_LIBRARY rdmacm)
+      find_library(IBVERBS_LIBRARY ibverbs)
+      if(RDMACM_INCLUDE_DIR AND IBVERBS_INCLUDE_DIR AND RDMACM_LIBRARY AND IBVERBS_LIBRARY)
+        message(STATUS "Build with SMB Direct support")
+        set(HAVE_LIBRDMACM 1)
+        list(APPEND core_DEPENDS ${RDMACM_LIBRARY} ${IBVERBS_LIBRARY})
+      else()
+        message(STATUS "librdmacm/libibverbs not found, building without SMB Direct")
+      endif()
+    endif()
+  endif()
+
+  option(ENABLE_OPENSSL "Use OpenSSL 3 libcrypto for signing and encryption" OFF)
+  if(ENABLE_OPENSSL)
+    find_package(OpenSSL 3.0 COMPONENTS Crypto)
+    if(NOT OPENSSL_FOUND)
+      message(FATAL_ERROR "OpenSSL 3.0 or later libcrypto not found")
+    endif()
+    message(STATUS "Build with OpenSSL")
+    set(HAVE_OPENSSL 1)
+    include_directories(${OPENSSL_INCLUDE_DIR})
+    list(APPEND core_DEPENDS ${OPENSSL_CRYPTO_LIBRARY})
   endif()
 
   if(NOT ESP_PLATFORM)
@@ -99,16 +230,6 @@ endif()
       )
     endif()
     
-    if(CMAKE_SYSTEM_NAME MATCHES Linux)
-      if (ENABLE_LIBKRB5)
-        set(core_DEPENDS ${LIBKRB5_LIBRARY} CACHE STRING "" FORCE)  
-      endif()
-    elseif(IOS)
-      if (ENABLE_GSSAPI)
-        set(core_DEPENDS ${GSSAPI_LIBRARIES} CACHE STRING "" FORCE)   
-      endif()
-    endif()
-
     if(MSVC AND BUILD_SHARED_LIBS)
       # If we are building dll with msvc, then generate a def file according to the syms file
       set(SYMS_FILE_PATH "${PROJECT_SOURCE_DIR}/lib/libsmb2.syms")
@@ -152,12 +273,11 @@ endif()
         if(DEBUG)
           add_definitions(-DDEBUG)
         endif()
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -fno-builtin")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -s")                
       endif()
-      set(CMAKE_C_FLAGS "-Wall") 
+      # as ps2sdk's Makefile.iopglobal: the IOP kernel cannot take the
+      # several LO relocs to one HI that GCC makes without -mno-explicit-relocs
+      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -fno-builtin -msoft-float -mno-explicit-relocs")
       include_directories(${CMAKE_CURRENT_BINARY_DIR} include/ps2)
-      add_compile_options("${CMAKE_C_FLAGS}")
     elseif(VITA)
       add_definitions(-DNEED_READV -DNEED_WRITEV -DNEED_GETLOGIN_R)  
     elseif(PICO_BOARD)
@@ -173,16 +293,51 @@ endif()
       find_library(SOCKET_LIBRARY socket)
       find_library(NSL_LIBRARY nsl)
       list(APPEND CORE_LIBRARIES ${SOCKET_LIBRARY} ${NSL_LIBRARY})
+    elseif(CMAKE_SYSTEM_NAME STREQUAL Haiku)
+      # Errors are reported as -errno, but Haiku's error codes are negative
+      # already. The error mapper makes errno match the positive constants;
+      # its symbols are hidden, so it does not affect users of the library.
+      add_definitions(-DB_USE_POSITIVE_POSIX_ERRORS)
+      # The socket functions live in libnetwork.so, not in libroot.so
+      list(APPEND CORE_LIBRARIES posix_error_mapper network)
     endif()
 
+    # Look for a cryptographically strong source of random bytes for
+    # smb2_random_bytes(). Only probed on the host-like systems: anything we
+    # do not positively identify here simply falls back to the random()
+    # based path, so the console and embedded toolchains are left alone.
+    if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin|.*BSD|Solaris|Android|Haiku")
+      include(CheckSymbolExists)
+      check_symbol_exists(arc4random_buf "stdlib.h" HAVE_ARC4RANDOM_BUF)
+      check_symbol_exists(getrandom "sys/random.h" HAVE_GETRANDOM)
+      if(HAVE_ARC4RANDOM_BUF)
+        add_definitions(-DHAVE_ARC4RANDOM_BUF)
+      endif()
+      if(HAVE_GETRANDOM)
+        add_definitions(-DHAVE_SYS_RANDOM_H -DHAVE_GETRANDOM)
+      endif()
+      if(EXISTS "/dev/urandom")
+        add_definitions(-DHAVE_DEV_URANDOM)
+      endif()
+    endif()
+
+
+    add_subdirectory(lib)
+    if(ENABLE_LIBDCERPC)
+      add_subdirectory(libdcerpc)
+    endif()
 
     if(ENABLE_EXAMPLES)
       add_subdirectory(examples)
     endif()
 
-    add_subdirectory(lib)
+    if(ENABLE_UTILS)
+      add_subdirectory(utils)
+    endif()
 
-  if(NOT PICO_BOARD OR ESP_PLATFORM)
+  # The packaging and install rules below need PROJECT_VERSION and the
+  # INSTALL_* paths, and neither is set for the pico or the esp-idf build.
+  if(NOT PICO_BOARD AND NOT ESP_PLATFORM)
       include(CMakePackageConfigHelpers)
       write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/libsmb2-config-version.cmake
                                     VERSION ${PROJECT_VERSION}
@@ -191,8 +346,13 @@ endif()
       configure_file(cmake/libsmb2.pc.cmake
                   ${CMAKE_CURRENT_BINARY_DIR}/libsmb2.pc @ONLY)
 
-      install(DIRECTORY include/smb2
-            DESTINATION ${INSTALL_INC_DIR})
+      install(FILES include/smb2/libsmb2.h
+                    include/smb2/libsmb2-raw.h
+                    include/smb2/libsmb2-share-enum.h
+                    include/smb2/smb2.h
+                    include/smb2/smb2-errors.h
+                    include/smb2/smb2-ioctl.h
+            DESTINATION ${INSTALL_INC_DIR}/smb2)
 
       install(FILES cmake/FindSMB2.cmake
                   ${CMAKE_CURRENT_BINARY_DIR}/libsmb2-config-version.cmake

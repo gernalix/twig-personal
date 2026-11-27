@@ -79,7 +79,10 @@ int gethostname(char *name, size_t len)
 #define select(nfds, readfds, writefds, exceptfds, timeout) WaitSelect(nfds, readfds, writefds, exceptfds, timeout, NULL)
 #endif
 #ifdef libnix
-StdFileDes *_lx_fhfromfd(int d) { return NULL; }
+/* stdlib.h used to include stdio.h. It no longer does, so StdFileDes
+   is not declared until stdio.h itself is included. */
+#include <stdio.h>
+__stdargs StdFileDes *_lx_fhfromfd(int d) { return NULL; }
 struct MinList __filelist = { (struct MinNode *) &__filelist.mlh_Tail, NULL, (struct MinNode *) &__filelist.mlh_Head };
 #endif
 #endif
@@ -142,35 +145,91 @@ time_t time(time_t *tloc)
         return sec;
 }
 
+struct prnt_buf {
+        char *str;
+        int len;
+};
+
+/* prnt() also calls this with 0x200 before the first character and 0x201 after the last */
+static void prnt_char(void *context, int c)
+{
+        struct prnt_buf *buf = context;
+
+        if (c == 0x200 || c == 0x201) {
+                return;
+        }
+        if (buf->str) {
+                buf->str[buf->len] = c;
+        }
+        buf->len++;
+}
+
 int asprintf(char **strp, const char *fmt, ...)
 {
-        int len;
-        char *str;
-        va_list args;        
+        struct prnt_buf buf = { NULL, 0 };
+        va_list args;
 
         va_start(args, fmt);
-        str = malloc(256);
-        len = sprintf(str, fmt, args);
+        prnt(prnt_char, &buf, fmt, args);
         va_end(args);
-        *strp = str;
-        return len;
+        buf.str = malloc(buf.len + 1);
+        if (buf.str == NULL) {
+                return -1;
+        }
+        buf.len = 0;
+        va_start(args, fmt);
+        prnt(prnt_char, &buf, fmt, args);
+        va_end(args);
+        buf.str[buf.len] = '\0';
+        *strp = buf.str;
+        return buf.len;
 }
 
 int errno;
 
-int iop_connect(int sockfd, struct sockaddr *addr, socklen_t addrlen)
+/*
+ * lwIP's errno is ps2ip's own and not ours, and SO_ERROR is 0 when a
+ * non-blocking call would have blocked.
+ */
+static int iop_errno(int sockfd, int would_block)
 {
-        int rc;
         int err = 0;
         socklen_t err_size = sizeof(err);
 
-        if ((rc = lwip_connect(sockfd, addr, addrlen)) < 0) {
-                if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR,
-			       (char *)&err, &err_size) != 0 || err != 0) {
-                        errno = err;
-                }
+        if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR,
+                       (char *)&err, &err_size) != 0) {
+                return EIO;
         }
+        return err ? err : would_block;
+}
 
+int iop_connect(int sockfd, struct sockaddr *addr, socklen_t addrlen)
+{
+        int rc;
+
+        if ((rc = lwip_connect(sockfd, addr, addrlen)) < 0) {
+                errno = iop_errno(sockfd, EINPROGRESS);
+        }
+        return rc;
+}
+
+int iop_read(int sockfd, void *buf, size_t len)
+{
+        int rc;
+
+        if ((rc = lwip_recv(sockfd, buf, len, MSG_DONTWAIT)) < 0) {
+                errno = iop_errno(sockfd, EAGAIN);
+        }
+        return rc;
+}
+
+int iop_write(int sockfd, const void *buf, size_t len)
+{
+        int rc;
+
+        if ((rc = lwip_send(sockfd, (void *)buf, len, MSG_DONTWAIT)) < 0) {
+                errno = iop_errno(sockfd, EAGAIN);
+        }
         return rc;
 }
 
@@ -231,6 +290,7 @@ int iop_connect(int sockfd, struct sockaddr *addr, socklen_t addrlen)
 #include <3ds/types.h>	
 #elif defined(__wii__) || defined(__gamecube__)
 #include <gctypes.h>
+#include <stdarg.h>
 #elif defined(__WIIU__)
 #include <wut_types.h>
 #elif defined(__NDS__)
@@ -240,16 +300,133 @@ int iop_connect(int sockfd, struct sockaddr *addr, socklen_t addrlen)
 #define login_num ENXIO
 
 #if defined(__wii__) || defined(__gamecube__)
-s32 getsockopt(int sockfd, int level, int optname, void *optval,
-socklen_t *optlen)
+int smb2_net_connect(int fd, struct sockaddr *addr, socklen_t addrlen)
+{
+        s32 ret = net_connect(fd, addr, addrlen);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return 0;
+}
+
+int smb2_net_close(int fd)
+{
+        s32 ret = net_close(fd);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return 0;
+}
+
+int smb2_net_fcntl(int fd, int cmd, ...)
+{
+        u32 val = 0;
+        va_list ap;
+
+        va_start(ap, cmd);
+        val = (u32)va_arg(ap, int);
+        va_end(ap);
+
+        s32 ret = net_fcntl(fd, (u32)cmd, val);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return (int)ret;
+}
+
+ssize_t smb2_net_write(int fd, const void *buf, size_t count)
+{
+        s32 ret = net_write(fd, buf, count);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return ret;
+}
+
+ssize_t smb2_net_read(int fd, void *buf, size_t count)
+{
+        s32 ret = net_read(fd, buf, count);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return ret;
+}
+
+int smb2_net_socket(int domain, int type, int protocol)
+{
+        s32 ret = net_socket((u32)domain, (u32)type, (u32)protocol);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return (int)ret;
+}
+
+int smb2_net_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)
 {
 #ifdef __gamecube__
-         return net_getsockopt(sockfd, level, optname, optval, optlen);
-#else
-	 return 0;
+        s32 ret = net_getsockopt(fd, (u32)level, (u32)optname, optval, optlen);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
 #endif
+        return 0;
+}
 
+int smb2_net_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)
+{
+        s32 ret = net_setsockopt(fd, (u32)level, (u32)optname, optval, optlen);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return 0;
+}
 
+int smb2_net_bind(int fd, struct sockaddr *addr, socklen_t addrlen)
+{
+        s32 ret = net_bind(fd, addr, addrlen);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return 0;
+}
+
+int smb2_net_listen(int fd, int backlog)
+{
+        s32 ret = net_listen(fd, (u32)backlog);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return 0;
+}
+
+int smb2_net_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+        s32 ret = net_accept(fd, addr, addrlen);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return (int)ret;
+}
+
+int smb2_net_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
+{
+        s32 ret = net_select(nfds, readfds, writefds, exceptfds, timeout);
+        if (ret < 0) {
+                errno = -ret;
+                return -1;
+        }
+        return (int)ret;
 }
 #endif
 
@@ -460,7 +637,11 @@ ssize_t readv(t_socket fd, const struct iovec* vector, int count)
 #endif
 
 #ifdef NEED_POLL
+#ifdef SMB2_HAVE_OGC_POLL_H
+int poll(struct pollfd *fds, nfds_t nfds, int timo)
+#else
 int poll(struct pollfd *fds, unsigned int nfds, int timo)
+#endif
 {
         struct timeval timeout, *toptr;
         fd_set ifds, ofds, efds, *ip, *op;
@@ -513,6 +694,8 @@ int poll(struct pollfd *fds, unsigned int nfds, int timo)
                 toptr = &timeout;
                 timeout.tv_sec = (unsigned)timo / 1000;
                 timeout.tv_usec = ((unsigned)timo % 1000) * 1000;
+        } else {
+                toptr = NULL;
         }
 
 #else
@@ -542,8 +725,12 @@ int poll(struct pollfd *fds, unsigned int nfds, int timo)
                         revents |= POLLIN;
                 if(events & POLLOUT && FD_ISSET(fd, &ofds))
                         revents |= POLLOUT;
-                if(FD_ISSET(fd, &efds))
-                        revents |= POLLHUP;
+                /* On BSD-style stacks the except set signals out-of-band
+                 * data, not hang-up. Hang-up shows up as readable with
+                 * recv() returning 0.
+                 */
+                if(events & POLLPRI && FD_ISSET(fd, &efds))
+                        revents |= POLLPRI;
                 if (revents) {
                         fds[i].revents = revents;
                         rc++;
