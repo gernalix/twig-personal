@@ -19,6 +19,7 @@ import java.util.zip.ZipOutputStream
  * Write: append new entries; delete/rename/overwrite rewrite local archives with UTF-8 names.
  */
 class ZipFileSystem(
+    private val zstdDecoder: ((InputStream) -> InputStream)? = null,
     private val preferredCharsets: () -> List<Charset> = { listOf(Charset.forName("GB18030")) },
 ) : ArchiveFileSystem() {
 
@@ -51,6 +52,9 @@ class ZipFileSystem(
         try {
             val zip = org.apache.commons.compress.archivers.zip.ZipFile.builder()
                 .setSeekableByteChannel(channel)
+                .setZstdInputStreamFactory { input ->
+                    zstdDecoder?.invoke(input) ?: throw FsException("zstd support is not available")
+                }
                 // Parse arbitrary legacy bytes without failing before our per-entry decoder runs.
                 .setCharset(Charsets.ISO_8859_1)
                 // Keep remote reads limited to the central directory; data offsets are lazy.

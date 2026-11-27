@@ -8,6 +8,7 @@ import com.twig.fs.archive.SingleFileSystem
 import com.twig.fs.archive.TarFileSystem
 import com.twig.fs.archive.ZipFileSystem
 import com.twig.fs.local.LocalFileSystem
+import com.twig.fs.zstd.ZstdInputStream
 
 /** App entry point: apply the persisted theme as early as possible to avoid startup flash; also register the base sources that don't depend on user configuration. */
 class TwigApp : Application() {
@@ -49,16 +50,15 @@ class TwigApp : Application() {
             LocalFileSystem.unixMetadataReader = UnixFiles::stat
             LocalFileSystem.selinuxContextReader = UnixFiles::context
             FsRegistry.register(LocalFileSystem())
-            FsRegistry.register(ZipFileSystem { TextCodec.preferred })
+            // The JVM archive module uses the Android native decoder for ZIP and standalone Zstd.
+            FsRegistry.register(ZipFileSystem(zstdDecoder = ::ZstdInputStream) { TextCodec.preferred })
             FsRegistry.register(SevenZFileSystem())
             FsRegistry.register(TarFileSystem())
             // Single-file compression: one scheme per format, one shared implementation
             FsRegistry.register(SingleFileSystem.gzip())
             FsRegistry.register(SingleFileSystem.xz())
             FsRegistry.register(SingleFileSystem.bzip2())
-            // zstd is the one codec :fs-archive cannot decode on its own (JNI, and that
-            // module is plain JVM) — hand it the stream wrapper here
-            FsRegistry.register(SingleFileSystem.zstd { com.twig.fs.zstd.ZstdInputStream(it) })
+            FsRegistry.register(SingleFileSystem.zstd(::ZstdInputStream))
             rarFileSystem()?.let { FsRegistry.register(it) } // the libre flavor has no RAR, see RarSupport.kt
             FsRegistry.register(SafFileSystem(app))
             AndroidDataAccess.install(app)

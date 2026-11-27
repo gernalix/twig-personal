@@ -4,12 +4,17 @@ import com.twig.core.CopyEngine
 import com.twig.core.FsRegistry
 import com.twig.core.XFile
 import com.twig.fs.local.LocalFileSystem
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
+import org.apache.commons.compress.archivers.zip.ZipMethod
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.nio.charset.Charset
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -41,6 +46,30 @@ class ZipFileSystemTest {
 
     private fun archiveX() =
         XFile(scheme = "file", path = archive.absolutePath, isDir = false)
+
+    @Test
+    fun readsZstdEntriesThroughInjectedDecoder() {
+        val payload = "zstd inside zip".toByteArray()
+        val frame = "28b52ffd04587900007a73746420696e73696465207a6970e47ae769"
+            .chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val file = File(tmp, "zstd.zip")
+        ZipArchiveOutputStream(file).use { zip ->
+            val entry = ZipArchiveEntry("payload.txt").apply {
+                method = ZipMethod.ZSTD.code
+                size = payload.size.toLong()
+                compressedSize = frame.size.toLong()
+                crc = CRC32().apply { update(payload) }.value
+            }
+            zip.addRawArchiveEntry(entry, frame.inputStream())
+        }
+        val fs = ZipFileSystem(zstdDecoder = { input ->
+            assertArrayEquals(frame, input.readBytes())
+            payload.inputStream()
+        })
+        val root = fs.rootOf(XFile(scheme = "file", path = file.absolutePath, isDir = false))
+        val entry = fs.list(root).single()
+        assertArrayEquals(payload, fs.openInput(entry).use { it.readBytes() })
+    }
 
     @Test
     fun listsRootWithDirsFirst() {

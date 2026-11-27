@@ -20,6 +20,9 @@
 -dontwarn com.hierynomus.**
 -dontwarn net.schmizz.**
 
+# ZipFileSystem supplies its own Zstd stream factory. Commons Compress's fallback is optional.
+-dontwarn com.github.luben.zstd.ZstdInputStream
+
 # OkHttp's optional platform classes
 -dontwarn okhttp3.internal.platform.**
 -dontwarn org.conscrypt.**
