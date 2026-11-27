@@ -267,9 +267,22 @@ dependencies {
     implementation("com.github.termux.termux-app:terminal-emulator:v0.118.3")
 
     // Media playback: ExoPlayer (own demuxer, full MKV/MP4) + ffmpeg audio software decode (AC3/EAC3/DTS/TrueHD, etc.)
+    val media3Version = libs.versions.media3.get()
+    require(libs.versions.jellyfinFfmpeg.get().substringBefore('+') == media3Version) {
+        "The Jellyfin FFmpeg decoder and Media3 must use the same version"
+    }
+    constraints {
+        for (module in listOf(
+            "common", "container", "database", "datasource", "decoder", "exoplayer", "extractor",
+        )) {
+            implementation("androidx.media3:media3-$module") {
+                version { strictly(media3Version) }
+            }
+        }
+    }
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.jellyfin.media3.ffmpeg)
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
     // Shizuku: run a process under shell (uid 2000), so we can read Android
     // 11+ /Android/data and /Android/obb without root — those two directories

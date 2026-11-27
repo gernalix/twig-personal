@@ -1,0 +1,400 @@
+{
+  "groups": [
+    {
+      "contexts": [
+        ":app|androidLintTool|false",
+        ":fs-nfs|androidLintTool|false",
+        ":fs-smb|androidLintTool|false",
+        ":fs-zstd|androidLintTool|false"
+      ],
+      "versions": {
+        "com.google.code.gson:gson": "2.15.0",
+        "com.google.errorprone:error_prone_annotations": "2.53.0",
+        "com.google.guava:failureaccess": "1.0.3",
+        "com.google.guava:guava": "33.8.0-jre",
+        "com.google.j2objc:j2objc-annotations": "3.1",
+        "com.google.jimfs:jimfs": "1.3.2",
+        "com.google.protobuf:protobuf-java": "4.36.2",
+        "com.sun.istack:istack-commons-runtime": "3.0.12",
+        "com.sun.xml.fastinfoset:FastInfoset": "1.2.18",
+        "commons-codec:commons-codec": "1.23.0",
+        "commons-io:commons-io": "2.22.0",
+        "commons-logging:commons-logging": "1.4.0",
+        "jakarta.activation:jakarta.activation-api": "1.2.2",
+        "jakarta.xml.bind:jakarta.xml.bind-api": "2.3.3",
+        "net.java.dev.jna:jna": "5.19.1",
+        "net.java.dev.jna:jna-platform": "5.19.1",
+        "org.apache.commons:commons-compress": "1.28.0",
+        "org.apache.commons:commons-lang3": "3.22.0",
+        "org.apache.groovy:groovy": "6.0.0",
+        "org.apache.groovy:groovy-bom": "6.0.0",
+        "org.apache.httpcomponents:httpclient": "4.5.14",
+        "org.apache.httpcomponents:httpmime": "4.5.14",
+        "org.bouncycastle:bcpkix-jdk18on": "1.87",
+        "org.bouncycastle:bcprov-jdk18on": "1.87",
+        "org.bouncycastle:bcutil-jdk18on": "1.87",
+        "org.checkerframework:checker-qual": "4.4.0",
+        "org.glassfish.jaxb:jaxb-runtime": "2.3.9",
+        "org.glassfish.jaxb:txw2": "2.3.9",
+        "org.jetbrains.kotlin:kotlin-reflect": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-stdlib": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk7": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk8": "2.4.21",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-bom": "1.11.0",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core": "1.11.0",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm": "1.11.0",
+        "org.jetbrains:annotations": "26.1.0",
+        "org.jvnet.staxex:stax-ex": "1.8.3",
+        "org.ow2.asm:asm": "9.11.1",
+        "org.ow2.asm:asm-analysis": "9.11.1",
+        "org.ow2.asm:asm-commons": "9.11.1",
+        "org.ow2.asm:asm-tree": "9.11.1"
+      }
+    },
+    {
+      "contexts": [
+        ":app|coreLibraryDesugaring|false"
+      ],
+      "versions": {
+        "com.android.tools:desugar_jdk_libs": "2.1.5",
+        "com.android.tools:desugar_jdk_libs_configuration": "2.1.5"
+      }
+    },
+    {
+      "contexts": [
+        ":app|fullDebugAndroidTestCompileClasspath|false",
+        ":app|fullDebugCompileClasspath|false",
+        ":app|fullDebugRuntimeClasspath|false",
+        ":app|fullReleaseCompileClasspath|false",
+        ":app|fullReleaseRuntimeClasspath|false",
+        ":app|libreDebugAndroidTestCompileClasspath|false",
+        ":app|libreDebugCompileClasspath|false",
+        ":app|libreDebugRuntimeClasspath|false",
+        ":app|libreReleaseCompileClasspath|false",
+        ":app|libreReleaseRuntimeClasspath|false"
+      ],
+      "versions": {
+        "com.google.guava:guava": "33.8.0-android"
+      }
+    },
+    {
+      "contexts": [
+        ":app|fullDebugAndroidTestLintChecksClasspath|false",
+        ":app|fullDebugLintChecksClasspath|false",
+        ":app|fullReleaseLintChecksClasspath|false",
+        ":app|libreDebugAndroidTestLintChecksClasspath|false",
+        ":app|libreDebugLintChecksClasspath|false",
+        ":app|libreReleaseLintChecksClasspath|false"
+      ],
+      "versions": {
+        "androidx.annotation:annotation": "1.11.0",
+        "androidx.annotation:annotation-experimental": "1.6.0",
+        "androidx.annotation:annotation-jvm": "1.11.0",
+        "androidx.compose.runtime:runtime-annotation": "1.13.0",
+        "androidx.compose.runtime:runtime-annotation-android": "1.13.0",
+        "androidx.concurrent:concurrent-futures": "1.3.0",
+        "androidx.customview:customview": "1.2.0",
+        "androidx.customview:customview-poolingcontainer": "1.1.0",
+        "androidx.drawerlayout:drawerlayout": "1.2.0",
+        "androidx.emoji2:emoji2": "1.7.0",
+        "androidx.emoji2:emoji2-views-helper": "1.7.0",
+        "androidx.exifinterface:exifinterface": "1.4.2",
+        "androidx.loader:loader": "1.2.0",
+        "androidx.navigationevent:navigationevent": "1.2.0",
+        "androidx.navigationevent:navigationevent-android": "1.2.0",
+        "androidx.profileinstaller:profileinstaller": "1.4.1",
+        "androidx.savedstate:savedstate": "1.5.0",
+        "androidx.savedstate:savedstate-android": "1.5.0",
+        "androidx.savedstate:savedstate-ktx": "1.5.0",
+        "androidx.tracing:tracing": "2.0.5",
+        "androidx.tracing:tracing-android": "2.0.5",
+        "androidx.vectordrawable:vectordrawable": "1.2.0",
+        "androidx.vectordrawable:vectordrawable-animated": "1.2.0",
+        "androidx.versionedparcelable:versionedparcelable": "1.2.1",
+        "androidx.viewpager:viewpager": "1.1.0",
+        "com.google.guava:failureaccess": "1.0.3",
+        "com.google.guava:guava": "33.8.0-android",
+        "commons-codec:commons-codec": "1.23.0",
+        "commons-io:commons-io": "2.22.0",
+        "org.apache.commons:commons-lang3": "3.22.0",
+        "org.jetbrains.kotlin:kotlin-bom": "2.4.21",
+        "org.jetbrains.kotlinx:kotlinx-serialization-bom": "1.13.0",
+        "org.jetbrains.kotlinx:kotlinx-serialization-core": "1.13.0",
+        "org.jetbrains.kotlinx:kotlinx-serialization-core-jvm": "1.13.0",
+        "org.jetbrains:annotations": "26.1.0",
+        "org.jspecify:jspecify": "1.0.1",
+        "org.slf4j:slf4j-api": "2.0.20"
+      }
+    },
+    {
+      "contexts": [
+        ":app|fullDebugUnitTestCompileClasspath|false",
+        ":app|fullDebugUnitTestRuntimeClasspath|false",
+        ":app|fullReleaseUnitTestCompileClasspath|false",
+        ":app|fullReleaseUnitTestRuntimeClasspath|false",
+        ":app|libreDebugUnitTestCompileClasspath|false",
+        ":app|libreDebugUnitTestRuntimeClasspath|false",
+        ":app|libreReleaseUnitTestCompileClasspath|false",
+        ":app|libreReleaseUnitTestRuntimeClasspath|false"
+      ],
+      "versions": {
+        "com.google.guava:guava": "33.8.0-jre"
+      }
+    },
+    {
+      "contexts": [
+        ":app|fullDebugUnitTestLintChecksClasspath|false",
+        ":app|fullReleaseUnitTestLintChecksClasspath|false",
+        ":app|libreDebugUnitTestLintChecksClasspath|false",
+        ":app|libreReleaseUnitTestLintChecksClasspath|false"
+      ],
+      "versions": {
+        "androidx.annotation:annotation": "1.11.0",
+        "androidx.annotation:annotation-experimental": "1.6.0",
+        "androidx.annotation:annotation-jvm": "1.11.0",
+        "androidx.compose.runtime:runtime-annotation": "1.13.0",
+        "androidx.compose.runtime:runtime-annotation-android": "1.13.0",
+        "androidx.concurrent:concurrent-futures": "1.3.0",
+        "androidx.concurrent:concurrent-futures-ktx": "1.3.0",
+        "androidx.customview:customview": "1.2.0",
+        "androidx.customview:customview-poolingcontainer": "1.1.0",
+        "androidx.drawerlayout:drawerlayout": "1.2.0",
+        "androidx.emoji2:emoji2": "1.7.0",
+        "androidx.emoji2:emoji2-views-helper": "1.7.0",
+        "androidx.exifinterface:exifinterface": "1.4.2",
+        "androidx.loader:loader": "1.2.0",
+        "androidx.navigationevent:navigationevent": "1.2.0",
+        "androidx.navigationevent:navigationevent-android": "1.2.0",
+        "androidx.profileinstaller:profileinstaller": "1.4.1",
+        "androidx.savedstate:savedstate": "1.5.0",
+        "androidx.savedstate:savedstate-android": "1.5.0",
+        "androidx.savedstate:savedstate-ktx": "1.5.0",
+        "androidx.vectordrawable:vectordrawable": "1.2.0",
+        "androidx.vectordrawable:vectordrawable-animated": "1.2.0",
+        "androidx.versionedparcelable:versionedparcelable": "1.2.1",
+        "androidx.viewpager:viewpager": "1.1.0",
+        "com.google.errorprone:error_prone_annotations": "2.53.0",
+        "com.google.guava:guava": "33.8.0-jre",
+        "commons-codec:commons-codec": "1.23.0",
+        "commons-io:commons-io": "2.22.0",
+        "org.apache.commons:commons-lang3": "3.22.0",
+        "org.bouncycastle:bc-jdk18on-bom": "1.87",
+        "org.conscrypt:conscrypt-openjdk-uber": "2.10.0",
+        "org.hamcrest:hamcrest-core": "3.0",
+        "org.jetbrains.kotlin:kotlin-bom": "2.4.21",
+        "org.jetbrains.kotlinx:kotlinx-serialization-bom": "1.13.0",
+        "org.jetbrains.kotlinx:kotlinx-serialization-core": "1.13.0",
+        "org.jetbrains.kotlinx:kotlinx-serialization-core-jvm": "1.13.0",
+        "org.jetbrains:annotations": "26.1.0",
+        "org.slf4j:slf4j-api": "2.0.20"
+      }
+    },
+    {
+      "contexts": [
+        ":app|kotlinAbiValidationCompatClasspath|false",
+        ":core-fs|kotlinAbiValidationCompatClasspath|false",
+        ":fs-archive-rar|kotlinAbiValidationCompatClasspath|false",
+        ":fs-archive|kotlinAbiValidationCompatClasspath|false",
+        ":fs-local|kotlinAbiValidationCompatClasspath|false",
+        ":fs-network|kotlinAbiValidationCompatClasspath|false",
+        ":fs-nfs|kotlinAbiValidationCompatClasspath|false",
+        ":fs-restic|kotlinAbiValidationCompatClasspath|false",
+        ":fs-smb|kotlinAbiValidationCompatClasspath|false",
+        ":fs-zstd|kotlinAbiValidationCompatClasspath|false",
+        ":git-lite|kotlinAbiValidationCompatClasspath|false"
+      ],
+      "versions": {
+        "org.jetbrains.kotlin:kotlin-build-tools-api": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-build-tools-cri-impl": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-build-tools-impl": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-compiler-embeddable": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-compiler-runner": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-daemon-client": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-daemon-embeddable": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-reflect": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-script-runtime": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-stdlib": "2.4.21",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm": "1.11.0",
+        "org.jetbrains:annotations": "26.1.0"
+      }
+    },
+    {
+      "contexts": [
+        ":app|kotlinBuildToolsApiClasspath|false",
+        ":app|kotlinCompilerClasspath|false",
+        ":core-fs|kotlinBuildToolsApiClasspath|false",
+        ":core-fs|kotlinCompilerClasspath|false",
+        ":core-fs|kotlinKlibCommonizerClasspath|false",
+        ":fs-archive-rar|kotlinBuildToolsApiClasspath|false",
+        ":fs-archive-rar|kotlinCompilerClasspath|false",
+        ":fs-archive-rar|kotlinKlibCommonizerClasspath|false",
+        ":fs-archive|kotlinBuildToolsApiClasspath|false",
+        ":fs-archive|kotlinCompilerClasspath|false",
+        ":fs-archive|kotlinKlibCommonizerClasspath|false",
+        ":fs-local|kotlinBuildToolsApiClasspath|false",
+        ":fs-local|kotlinCompilerClasspath|false",
+        ":fs-local|kotlinKlibCommonizerClasspath|false",
+        ":fs-network|kotlinBuildToolsApiClasspath|false",
+        ":fs-network|kotlinCompilerClasspath|false",
+        ":fs-network|kotlinKlibCommonizerClasspath|false",
+        ":fs-nfs|kotlinBuildToolsApiClasspath|false",
+        ":fs-nfs|kotlinCompilerClasspath|false",
+        ":fs-restic|kotlinBuildToolsApiClasspath|false",
+        ":fs-restic|kotlinCompilerClasspath|false",
+        ":fs-restic|kotlinKlibCommonizerClasspath|false",
+        ":fs-smb|kotlinBuildToolsApiClasspath|false",
+        ":fs-smb|kotlinCompilerClasspath|false",
+        ":fs-zstd|kotlinBuildToolsApiClasspath|false",
+        ":fs-zstd|kotlinCompilerClasspath|false",
+        ":git-lite|kotlinBuildToolsApiClasspath|false",
+        ":git-lite|kotlinCompilerClasspath|false",
+        ":git-lite|kotlinKlibCommonizerClasspath|false"
+      ],
+      "versions": {
+        "org.jetbrains.kotlin:kotlin-reflect": "2.4.21",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm": "1.11.0",
+        "org.jetbrains:annotations": "26.1.0"
+      }
+    },
+    {
+      "contexts": [
+        ":app|unified-test-platform-gradle-work-action|false",
+        ":fs-nfs|unified-test-platform-gradle-work-action|false",
+        ":fs-smb|unified-test-platform-gradle-work-action|false",
+        ":fs-zstd|unified-test-platform-gradle-work-action|false"
+      ],
+      "versions": {
+        "com.google.protobuf:protobuf-java": "4.36.2",
+        "org.jetbrains.kotlin:kotlin-stdlib": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk7": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk8": "2.4.21",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-bom": "1.11.0",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core": "1.11.0",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm": "1.11.0",
+        "org.jetbrains:annotations": "26.1.0",
+        "org.junit.platform:junit-platform-commons": "6.1.3",
+        "org.junit.platform:junit-platform-engine": "6.1.3",
+        "org.junit.platform:junit-platform-launcher": "6.1.3",
+        "org.junit:junit-bom": "6.1.3"
+      }
+    },
+    {
+      "contexts": [
+        ":core-fs|kotlinCompilerPluginClasspathMain|false",
+        ":core-fs|kotlinCompilerPluginClasspathTest|false",
+        ":fs-archive-rar|kotlinCompilerPluginClasspathMain|false",
+        ":fs-archive-rar|kotlinCompilerPluginClasspathTest|false",
+        ":fs-archive|kotlinCompilerPluginClasspathMain|false",
+        ":fs-archive|kotlinCompilerPluginClasspathTest|false",
+        ":fs-local|kotlinCompilerPluginClasspathMain|false",
+        ":fs-local|kotlinCompilerPluginClasspathTest|false",
+        ":fs-network|kotlinCompilerPluginClasspathMain|false",
+        ":fs-network|kotlinCompilerPluginClasspathTest|false",
+        ":fs-nfs|debugAndroidTestLintChecksClasspath|false",
+        ":fs-nfs|debugLintChecksClasspath|false",
+        ":fs-nfs|releaseLintChecksClasspath|false",
+        ":fs-restic|kotlinCompilerPluginClasspathMain|false",
+        ":fs-restic|kotlinCompilerPluginClasspathTest|false",
+        ":fs-zstd|debugAndroidTestLintChecksClasspath|false",
+        ":fs-zstd|debugLintChecksClasspath|false",
+        ":fs-zstd|debugUnitTestLintChecksClasspath|false",
+        ":fs-zstd|releaseLintChecksClasspath|false",
+        ":fs-zstd|releaseUnitTestLintChecksClasspath|false",
+        ":git-lite|kotlinCompilerPluginClasspathMain|false",
+        ":git-lite|kotlinCompilerPluginClasspathTest|false"
+      ],
+      "versions": {
+        "org.jetbrains:annotations": "26.1.0"
+      }
+    },
+    {
+      "contexts": [
+        ":fs-nfs|debugUnitTestLintChecksClasspath|false",
+        ":fs-nfs|releaseUnitTestLintChecksClasspath|false"
+      ],
+      "versions": {
+        "org.hamcrest:hamcrest-core": "3.0",
+        "org.jetbrains:annotations": "26.1.0"
+      }
+    },
+    {
+      "contexts": [
+        ":fs-smb|debugAndroidTestLintChecksClasspath|false",
+        ":fs-smb|debugLintChecksClasspath|false",
+        ":fs-smb|releaseLintChecksClasspath|false"
+      ],
+      "versions": {
+        "org.bouncycastle:bcprov-jdk18on": "1.87",
+        "org.jetbrains:annotations": "26.1.0",
+        "org.slf4j:slf4j-api": "2.0.20"
+      }
+    },
+    {
+      "contexts": [
+        ":fs-smb|debugUnitTestLintChecksClasspath|false",
+        ":fs-smb|releaseUnitTestLintChecksClasspath|false"
+      ],
+      "versions": {
+        "org.bouncycastle:bcprov-jdk18on": "1.87",
+        "org.hamcrest:hamcrest-core": "3.0",
+        "org.jetbrains:annotations": "26.1.0",
+        "org.slf4j:slf4j-api": "2.0.20"
+      }
+    },
+    {
+      "contexts": [
+        ":|classpath|true"
+      ],
+      "versions": {
+        "com.google.auto.value:auto-value-annotations": "1.11.1",
+        "com.google.code.gson:gson": "2.15.0",
+        "com.google.crypto.tink:tink": "1.24.0",
+        "com.google.dagger:dagger": "2.60.1",
+        "com.google.errorprone:error_prone_annotations": "2.53.0",
+        "com.google.flatbuffers:flatbuffers-java": "25.2.10",
+        "com.google.guava:failureaccess": "1.0.3",
+        "com.google.guava:guava": "33.8.0-jre",
+        "com.google.j2objc:j2objc-annotations": "3.1",
+        "com.google.jimfs:jimfs": "1.3.2",
+        "com.google.protobuf:protobuf-java": "4.36.2",
+        "com.google.protobuf:protobuf-java-util": "4.36.2",
+        "com.squareup:javawriter": "2.5.1",
+        "com.sun.istack:istack-commons-runtime": "3.0.12",
+        "com.sun.xml.fastinfoset:FastInfoset": "1.2.18",
+        "commons-codec:commons-codec": "1.23.0",
+        "commons-io:commons-io": "2.22.0",
+        "commons-logging:commons-logging": "1.4.0",
+        "jakarta.activation:jakarta.activation-api": "1.2.2",
+        "jakarta.xml.bind:jakarta.xml.bind-api": "2.3.3",
+        "net.java.dev.jna:jna": "5.19.1",
+        "net.java.dev.jna:jna-platform": "5.19.1",
+        "net.sf.jopt-simple:jopt-simple": "5.0.4",
+        "org.apache.commons:commons-compress": "1.28.0",
+        "org.apache.commons:commons-lang3": "3.22.0",
+        "org.apache.httpcomponents:httpmime": "4.5.14",
+        "org.bitbucket.b_c:jose4j": "0.9.7",
+        "org.bouncycastle:bcpkix-jdk18on": "1.87",
+        "org.bouncycastle:bcprov-jdk18on": "1.87",
+        "org.bouncycastle:bcutil-jdk18on": "1.87",
+        "org.checkerframework:checker-qual": "4.4.0",
+        "org.glassfish.jaxb:jaxb-runtime": "2.3.9",
+        "org.glassfish.jaxb:txw2": "2.3.9",
+        "org.jdom:jdom2": "2.0.6.1",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk7": "2.4.21",
+        "org.jetbrains.kotlin:kotlin-stdlib-jdk8": "2.4.21",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-bom": "1.11.0",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core": "1.11.0",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm": "1.11.0",
+        "org.jetbrains:annotations": "26.1.0",
+        "org.jvnet.staxex:stax-ex": "1.8.3",
+        "org.ow2.asm:asm": "9.11.1",
+        "org.ow2.asm:asm-analysis": "9.11.1",
+        "org.ow2.asm:asm-commons": "9.11.1",
+        "org.ow2.asm:asm-tree": "9.11.1",
+        "org.ow2.asm:asm-util": "9.11.1",
+        "org.slf4j:slf4j-api": "2.0.20",
+        "org.tensorflow:tensorflow-lite-metadata": "0.5.0"
+      }
+    }
+  ]
+}
