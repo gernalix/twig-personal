@@ -53,7 +53,7 @@ class SqliteFilterTest {
 
     @Test fun `typed values preserve null empty text mixed numbers quotes and numeric precision`() = database { db, s ->
         val values = listOf(null, "", "7", 7L, 1.2345678901234567, "O'Reilly%_", "a\u0000b", Double.POSITIVE_INFINITY)
-        values.forEach { db.execSQL("INSERT INTO entries(category) VALUES (?)", arrayOf(it)) }
+        values.forEach { db.execSQL("INSERT INTO entries(category) VALUES (?)", arrayOf<Any?>(it)) }
         val table = s.tables(signal()).single { it.name == "entries" }
         val options = s.filterOptions(table, "category", signal())
         assertEquals(values.size, options.size)

@@ -498,7 +498,7 @@ class AndroidDataAccessTest {
             return MatrixCursor(cols).apply {
                 for (f in files) {
                     streams(f)
-                    addRow(cols.map { column -> when (column) {
+                    addRow(cols.map<String, Any?> { column -> when (column) {
                             Document.COLUMN_DOCUMENT_ID -> id(f)
                             Document.COLUMN_DISPLAY_NAME -> f.name
                             Document.COLUMN_MIME_TYPE -> if (f.isDirectory) Document.MIME_TYPE_DIR else "text/plain"

@@ -100,7 +100,7 @@ class SqliteSessionTest {
                 db.execSQL("PRAGMA encoding = '$encoding'")
                 db.execSQL("CREATE TABLE entries(id INTEGER, value TEXT)")
                 db.rawQuery("PRAGMA encoding", null).use { it.moveToFirst(); assertEquals(encoding, it.getString(0)) }
-                db.execSQL("INSERT INTO entries VALUES (?, ?)", arrayOf(123, text))
+                db.execSQL("INSERT INTO entries VALUES (?, ?)", arrayOf<Any>(123, text))
             }
             session().use { reader ->
                 val table = reader.tables(signal()).single { it.name == "entries" }
@@ -140,13 +140,13 @@ class SqliteSessionTest {
         writer().use { db ->
             db.execSQL("CREATE TABLE ${SqliteSession.quote(name)}(id INTEGER PRIMARY KEY, a TEXT, b TEXT, payload BLOB, mixed)")
             val sql = "INSERT INTO ${SqliteSession.quote(name)} VALUES (?,?,?,?,?)"
-            db.execSQL(sql, arrayOf(0, "not a match", null, null, null))
-            db.execSQL(sql, arrayOf(1, "needle first", "needle twice", null, null))
-            db.execSQL(sql, arrayOf(2, "binary only", null, "needle".toByteArray(), "needle".toByteArray()))
-            db.execSQL(sql, arrayOf(3, "prefix NEEDLE suffix", null, null, null))
-            db.execSQL(sql, arrayOf(4, "declared BLOB only", null, "needle", null))
-            db.execSQL(sql, arrayOf(5, "O'Reilly", null, null, null))
-            db.execSQL(sql, arrayOf(6, null, null, null, "needle in untyped column"))
+            db.execSQL(sql, arrayOf<Any?>(0, "not a match", null, null, null))
+            db.execSQL(sql, arrayOf<Any?>(1, "needle first", "needle twice", null, null))
+            db.execSQL(sql, arrayOf<Any?>(2, "binary only", null, "needle".toByteArray(), "needle".toByteArray()))
+            db.execSQL(sql, arrayOf<Any?>(3, "prefix NEEDLE suffix", null, null, null))
+            db.execSQL(sql, arrayOf<Any?>(4, "declared BLOB only", null, "needle", null))
+            db.execSQL(sql, arrayOf<Any?>(5, "O'Reilly", null, null, null))
+            db.execSQL(sql, arrayOf<Any?>(6, null, null, null, "needle in untyped column"))
             db.execSQL("CREATE TABLE binary_only(payload BLOB)")
             db.execSQL("INSERT INTO binary_only VALUES (?)", arrayOf("needle".toByteArray()))
         }

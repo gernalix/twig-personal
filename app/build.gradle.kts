@@ -298,9 +298,9 @@ dependencies {
     //   we can deterministically drain the coroutines queued on viewModelScope
     //   before asserting.
     // Both are testImplementation only — never shipped in the APK.
-    testImplementation("org.robolectric:robolectric:4.14.1")
-    testImplementation("androidx.test:core-ktx:1.6.1")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    testImplementation("org.robolectric:robolectric:4.18.1")
+    testImplementation("androidx.test:core-ktx:1.7.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 }
 
 kotlin {

@@ -31,7 +31,7 @@ class SqliteTreeTest {
         try {
             SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
                 db.execSQL("CREATE TABLE entries(id INTEGER PRIMARY KEY, category TEXT, tag TEXT)")
-                repeat(240) { db.execSQL("INSERT INTO entries VALUES (?,?,?)", arrayOf(it, "g${it % 3}", "keep")) }
+                repeat(240) { db.execSQL("INSERT INTO entries VALUES (?,?,?)", arrayOf<Any>(it, "g${it % 3}", "keep")) }
             }
             tree.open("db", XFile("file", file.path, false))
             advanceUntilIdle()
@@ -323,7 +323,7 @@ class SqliteTreeTest {
                 db.beginTransaction()
                 try {
                     repeat(305) { db.execSQL("INSERT INTO users VALUES (?,?)",
-                        arrayOf(it, if (it % 2 == 0) "needle$it" else "other$it")) }
+                        arrayOf<Any>(it, if (it % 2 == 0) "needle$it" else "other$it")) }
                     db.setTransactionSuccessful()
                 } finally { db.endTransaction() }
             }
