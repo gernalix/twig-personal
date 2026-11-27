@@ -70,6 +70,13 @@
         ":app|libreReleaseCompileClasspath|false"
       ],
       "versions": {
+        "androidx.media3:media3-common": "1.11.1",
+        "androidx.media3:media3-container": "1.11.1",
+        "androidx.media3:media3-database": "1.11.1",
+        "androidx.media3:media3-datasource": "1.11.1",
+        "androidx.media3:media3-decoder": "1.11.1",
+        "androidx.media3:media3-exoplayer": "1.11.1",
+        "androidx.media3:media3-extractor": "1.11.1",
         "com.google.guava:guava": "33.8.0-android"
       }
     },
@@ -96,6 +103,13 @@
         "androidx.emoji2:emoji2-views-helper": "1.7.0",
         "androidx.exifinterface:exifinterface": "1.4.2",
         "androidx.loader:loader": "1.2.0",
+        "androidx.media3:media3-common": "1.11.1",
+        "androidx.media3:media3-container": "1.11.1",
+        "androidx.media3:media3-database": "1.11.1",
+        "androidx.media3:media3-datasource": "1.11.1",
+        "androidx.media3:media3-decoder": "1.11.1",
+        "androidx.media3:media3-exoplayer": "1.11.1",
+        "androidx.media3:media3-extractor": "1.11.1",
         "androidx.navigationevent:navigationevent": "1.2.0",
         "androidx.navigationevent:navigationevent-android": "1.2.0",
         "androidx.profileinstaller:profileinstaller": "1.4.1",
@@ -131,6 +145,13 @@
         ":app|libreReleaseRuntimeClasspath|false"
       ],
       "versions": {
+        "androidx.media3:media3-common": "1.11.1",
+        "androidx.media3:media3-container": "1.11.1",
+        "androidx.media3:media3-database": "1.11.1",
+        "androidx.media3:media3-datasource": "1.11.1",
+        "androidx.media3:media3-decoder": "1.11.1",
+        "androidx.media3:media3-exoplayer": "1.11.1",
+        "androidx.media3:media3-extractor": "1.11.1",
         "com.google.guava:guava": "33.8.0-android",
         "com.hierynomus:asn-one": "0.8.0"
       }
@@ -143,6 +164,13 @@
         ":app|libreReleaseUnitTestCompileClasspath|false"
       ],
       "versions": {
+        "androidx.media3:media3-common": "1.11.1",
+        "androidx.media3:media3-container": "1.11.1",
+        "androidx.media3:media3-database": "1.11.1",
+        "androidx.media3:media3-datasource": "1.11.1",
+        "androidx.media3:media3-decoder": "1.11.1",
+        "androidx.media3:media3-exoplayer": "1.11.1",
+        "androidx.media3:media3-extractor": "1.11.1",
         "com.google.guava:guava": "33.8.0-jre"
       }
     },
@@ -168,6 +196,13 @@
         "androidx.emoji2:emoji2-views-helper": "1.7.0",
         "androidx.exifinterface:exifinterface": "1.4.2",
         "androidx.loader:loader": "1.2.0",
+        "androidx.media3:media3-common": "1.11.1",
+        "androidx.media3:media3-container": "1.11.1",
+        "androidx.media3:media3-database": "1.11.1",
+        "androidx.media3:media3-datasource": "1.11.1",
+        "androidx.media3:media3-decoder": "1.11.1",
+        "androidx.media3:media3-exoplayer": "1.11.1",
+        "androidx.media3:media3-extractor": "1.11.1",
         "androidx.navigationevent:navigationevent": "1.2.0",
         "androidx.navigationevent:navigationevent-android": "1.2.0",
         "androidx.profileinstaller:profileinstaller": "1.4.1",
@@ -203,6 +238,13 @@
         ":app|libreReleaseUnitTestRuntimeClasspath|false"
       ],
       "versions": {
+        "androidx.media3:media3-common": "1.11.1",
+        "androidx.media3:media3-container": "1.11.1",
+        "androidx.media3:media3-database": "1.11.1",
+        "androidx.media3:media3-datasource": "1.11.1",
+        "androidx.media3:media3-decoder": "1.11.1",
+        "androidx.media3:media3-exoplayer": "1.11.1",
+        "androidx.media3:media3-extractor": "1.11.1",
         "com.google.guava:guava": "33.8.0-jre",
         "com.hierynomus:asn-one": "0.8.0"
       }

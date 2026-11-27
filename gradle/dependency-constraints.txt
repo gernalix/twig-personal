@@ -13,6 +13,13 @@ implementation androidx.emoji2:emoji2:1.7.0
 implementation androidx.emoji2:emoji2-views-helper:1.7.0
 implementation androidx.exifinterface:exifinterface:1.4.2
 implementation androidx.loader:loader:1.2.0
+implementation androidx.media3:media3-common:1.11.1
+implementation androidx.media3:media3-container:1.11.1
+implementation androidx.media3:media3-database:1.11.1
+implementation androidx.media3:media3-datasource:1.11.1
+implementation androidx.media3:media3-decoder:1.11.1
+implementation androidx.media3:media3-exoplayer:1.11.1
+implementation androidx.media3:media3-extractor:1.11.1
 implementation androidx.navigationevent:navigationevent:1.2.0
 implementation androidx.navigationevent:navigationevent-android:1.2.0
 implementation androidx.profileinstaller:profileinstaller:1.4.1
