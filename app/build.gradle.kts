@@ -284,12 +284,12 @@ dependencies {
     // scrypt for backup / password encryption (see secure/Secrets.kt).
     // ★ APK delta is 0: bcprov is already bundled via :fs-restic / :fs-network;
     //   this just exposes it to :app at compile time.
-    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.87")
 
     // XAPK packing, tree-key codec, sort rules etc. — pure JVM unit tests
     testImplementation("junit:junit:4.13.2")
     // Real restic fixtures in JVM UI tests use this decoder instead of Android JNI.
-    testImplementation("io.airlift:aircompressor:0.25")
+    testImplementation("io.airlift:aircompressor:2.0.3")
 
     // Unit tests for Android-bound classes like PaneViewModel (see PaneViewModelRestoreTest):
     // - robolectric provides a **real** Android framework implementation inside

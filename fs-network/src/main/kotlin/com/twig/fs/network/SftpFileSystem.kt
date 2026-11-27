@@ -12,6 +12,7 @@ import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.sftp.FileAttributes
 import net.schmizz.sshj.sftp.FileMode
 import net.schmizz.sshj.sftp.OpenMode
+import net.schmizz.sshj.sftp.RemoteResourceFilter
 import net.schmizz.sshj.sftp.Response
 import net.schmizz.sshj.sftp.SFTPClient
 import net.schmizz.sshj.sftp.SFTPException
@@ -535,7 +536,7 @@ class SftpFileSystem(
             try {
                 // SSHJ closes this directory handle even when the filter throws. Returning
                 // false only avoids retaining entries; it does not stop READDIR requests.
-                c.ls(serverPath(dir.path)) { info ->
+                c.ls(serverPath(dir.path), RemoteResourceFilter { info ->
                     if (!keepGoing()) throw StopCounting()
                     val isDir = if (info.attributes.type == FileMode.Type.SYMLINK) {
                         runCatching { c.stat(serverPath(join(dir.path, info.name))).type }
@@ -549,7 +550,7 @@ class SftpFileSystem(
                     }
                     if (visibleDirectories >= limit && visibleFiles >= limit) throw StopCounting()
                     false
-                }
+                })
             } catch (_: StopCounting) {
                 // Catch inside retry: stopping is not a transport failure and must not reconnect.
             }

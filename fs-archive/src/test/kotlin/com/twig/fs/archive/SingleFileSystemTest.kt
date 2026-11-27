@@ -16,6 +16,7 @@ import org.tukaani.xz.LZMA2Options
 import org.tukaani.xz.XZOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.time.Instant
 import java.util.zip.GZIPOutputStream
 
 class SingleFileSystemTest {
@@ -50,7 +51,8 @@ class SingleFileSystemTest {
     private fun gzFile(name: String, content: String = payload, mtime: Long = 0L): File {
         val f = File(tmp, name)
         if (mtime > 0) {
-            GzipCompressorOutputStream(FileOutputStream(f), GzipParameters().apply { modificationTime = mtime })
+            val parameters = GzipParameters().apply { modificationInstant = Instant.ofEpochMilli(mtime) }
+            GzipCompressorOutputStream(FileOutputStream(f), parameters)
                 .use { it.write(content.toByteArray()) }
         } else {
             GZIPOutputStream(FileOutputStream(f)).use { it.write(content.toByteArray()) }
