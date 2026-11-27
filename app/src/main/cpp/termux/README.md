@@ -2,11 +2,12 @@
 
 `termux.c` is an **unmodified upstream copy** of
 
-    termux-app / terminal-emulator/src/main/jni/termux.c   at tag v0.118.3
+    termux-app / terminal-emulator/src/main/jni/termux.c
     https://github.com/termux/termux-app
 
-which is the exact version of the `terminal-emulator` artifact this app depends
-on. It is GPL-3.0-only, the same licence as Twig, and it was already linked into
+The tag and commit in [the vendored source pins](../../../../../gradle/vendored-sources.json)
+match the `terminal-emulator` and `terminal-view` artifacts. The source is
+GPL-3.0-only, the same licence as Twig, and it was already linked into
 the APK before — as a prebuilt `libtermux.so` inside that AAR.
 
 ## Why it is built here instead of taken from the AAR

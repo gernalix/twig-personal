@@ -1,0 +1,18 @@
+{
+  "meta/zstd": {
+    "ref": "v1.6.0",
+    "revision": "916e8e70b33317d469a41ee837e47317807815c8"
+  },
+  "sahlberg/libsmb2": {
+    "ref": "libsmb2-7.0.0",
+    "revision": "62a861a043fadb69ee375464efb17e94099f8f76"
+  },
+  "sahlberg/libnfs": {
+    "ref": "master",
+    "revision": "3fb4f2a299cef533115d1658fe8261144b2f3e18"
+  },
+  "termux/termux-app": {
+    "ref": "v0.118.3",
+    "revision": "5b657c6adf4304e5198951ce815fe0205dcac29c"
+  }
+}

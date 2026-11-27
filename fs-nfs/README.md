@@ -8,9 +8,9 @@ flavors; full and libre still differ only in RAR. NFS JNI keep rules are supplie
 by this module, so ordinary builds have no dependency on its classes or native library.
 
 Vendored libnfs: https://github.com/sahlberg/libnfs
-Commit: 3fb4f2a299cef533115d1658fe8261144b2f3e18 (`configure.ac` version 19.0.1).
-This revision includes the NFSv4.0 lease fixes already used by Twig and the
-upstream READ and reconnect corrections also shipped on the 8.0 branch.
+The exact upstream commit is recorded in [the vendored source pins](../gradle/vendored-sources.json).
+Twig follows upstream master for the NFSv4.0 lease fixes and subsequent
+READ and reconnect corrections.
 
 The library is LGPL-2.1-or-later; generated protocol sources are BSD licensed.
 See src/main/cpp/libnfs/COPYING and the accompanying license files.

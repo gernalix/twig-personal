@@ -4,7 +4,7 @@ project(samba_jni C CXX)
 set(LIBSMB2_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libsmb2)
 
 # ── libsmb2 static library ──────────────────────────────────────────────────
-# Vendored libsmb2 7.0.0 at 62a861a043fadb69ee375464efb17e94099f8f76.
+# Source pin is recorded in gradle/vendored-sources.json.
 # The Android build omits the Kerberos and Apple AES backends.
 file(GLOB LIBSMB2_SRCS ${LIBSMB2_DIR}/lib/*.c)
 list(FILTER LIBSMB2_SRCS EXCLUDE REGEX
