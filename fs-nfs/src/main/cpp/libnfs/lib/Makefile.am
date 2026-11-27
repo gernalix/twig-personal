@@ -31,9 +31,9 @@ libnfs_la_SOURCES = \
 	socket.c \
 	../win32/win32_compat.c
 
-SOCURRENT=18
+SOCURRENT=19
 SOREVISION=0
-SOAGE=0
+SOAGE=1
 libnfs_la_LDFLAGS = -version-info $(SOCURRENT):$(SOREVISION):$(SOAGE) \
 	$(MAYBE_LIBKRB5)
 if HAVE_WIN32
@@ -54,4 +54,9 @@ libnfs_la_LIBADD = \
 if HAVE_TLS
 libnfs_la_CPPFLAGS += -I$(abs_top_srcdir)/tls $(TLS_CFLAGS)
 libnfs_la_LIBADD += ../tls/libtls.la $(TLS_LIBS)
+endif
+
+if HAVE_RDMA
+libnfs_la_SOURCES += rdma.c
+libnfs_la_LIBADD += $(RDMA_LIBS)
 endif

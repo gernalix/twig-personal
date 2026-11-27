@@ -77,6 +77,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -204,6 +205,40 @@ nfs_set_xprtsecurity(struct nfs_context *nfs, enum rpc_xprtsec xprtsec)
 #endif /* HAVE_TLS */
 
 int
+nfs_set_transport(struct nfs_context *nfs, enum rpc_transport transport)
+{
+	switch (transport) {
+	case RPC_TRANSPORT_TCP:
+		break;
+	case RPC_TRANSPORT_RDMA:
+#ifdef HAVE_RDMA
+		break;
+#else
+		nfs_set_error(nfs, "libnfs was built without RDMA support");
+		return -1;
+#endif
+	default:
+		nfs_set_error(nfs, "Unknown transport %d", transport);
+		return -1;
+	}
+
+	nfs->rpc->wanted_transport = transport;
+	return 0;
+}
+
+int
+nfs_nfsport(struct nfs_context *nfs)
+{
+	if (nfs->nfsi->nfsport) {
+		return nfs->nfsi->nfsport;
+	}
+	if (nfs->rpc->wanted_transport == RPC_TRANSPORT_RDMA) {
+		return 20049;
+	}
+	return 0;
+}
+
+int
 nfs_get_tid(struct nfs_context *nfs)
 {
 	assert(nfs->rpc->magic == RPC_CONTEXT_MAGIC);
@@ -244,7 +279,40 @@ nfs_which_events(struct nfs_context *nfs)
 int
 nfs_service(struct nfs_context *nfs, int revents)
 {
-	return rpc_service(nfs->rpc, revents);
+	struct rpc_context *rpc = nfs->rpc;
+	uint64_t generation;
+	char error[1024];
+	int ret;
+
+#ifdef HAVE_MULTITHREADING
+	if (rpc->multithreading_enabled)
+		nfs_mt_mutex_lock(&rpc->rpc_mutex);
+#endif
+	generation = rpc->error_generation;
+#ifdef HAVE_MULTITHREADING
+	if (rpc->multithreading_enabled)
+		nfs_mt_mutex_unlock(&rpc->rpc_mutex);
+#endif
+
+	ret = rpc_service(rpc, revents);
+	if (ret < 0) {
+#ifdef HAVE_MULTITHREADING
+		if (rpc->multithreading_enabled)
+			nfs_mt_mutex_lock(&rpc->rpc_mutex);
+#endif
+		/* The RPC string may describe an earlier, unrelated failure. */
+		snprintf(error, sizeof(error), "%s",
+			 rpc->error_generation != generation &&
+			 rpc->error_string && *rpc->error_string ?
+			 rpc->error_string :
+			 "RPC service failed without a diagnostic");
+#ifdef HAVE_MULTITHREADING
+		if (rpc->multithreading_enabled)
+			nfs_mt_mutex_unlock(&rpc->rpc_mutex);
+#endif
+		nfs_set_error(nfs, "%s", error);
+	}
+	return ret;
 }
 
 char *
@@ -297,12 +365,16 @@ nfs_set_context_args(struct nfs_context *nfs, const char *arg, const char *val)
 		rpc_set_gid(nfs_get_rpc_context(nfs), atoi(val));
 	} else if (!strcmp(arg, "timeo")) {
 		/* val is in deci-seconds */
-		const int timeout_msecs = atoi(val) * 100;
-		if (timeout_msecs < (10 * 1000)) {
+		const long timeo = strtol(val, NULL, 10);
+		if (timeo < 100) {
 			nfs_set_error(nfs, "timeo cannot be less than 100: %s", val);
 			return -1;
 		}
-		nfs_set_timeout(nfs, timeout_msecs);
+		if (timeo > INT_MAX / 100) {
+			nfs_set_error(nfs, "timeo is too large: %s", val);
+			return -1;
+		}
+		nfs_set_timeout(nfs, (int)timeo * 100);
 	} else if (!strcmp(arg, "retrans")) {
 		const int retrans = atoi(val);
 		if (retrans < 0) {
@@ -331,9 +403,9 @@ nfs_set_context_args(struct nfs_context *nfs, const char *arg, const char *val)
 		 */
 		int v;
 
-		if (!strcmp(val, "4.2")) {
+		if (!strcmp(val, "4.2") || !strcmp(val, "4.1")) {
 #ifdef LIBNFS_FEATURE_NFS4_2
-			v = NFS_V4_2;
+			v = !strcmp(val, "4.1") ? NFS_V4_1 : NFS_V4_2;
 #else
 			nfs_set_error(nfs, "NFS version %s is not supported",
 				      val);
@@ -354,6 +426,20 @@ nfs_set_context_args(struct nfs_context *nfs, const char *arg, const char *val)
 		 * alone rather than flattening it to "not supported".
 		 */
 		if (nfs_set_version(nfs, v) < 0) {
+			return -1;
+		}
+	} else if (!strcmp(arg, "proto")) {
+		enum rpc_transport transport;
+
+		if (!strcmp(val, "tcp")) {
+			transport = RPC_TRANSPORT_TCP;
+		} else if (!strcmp(val, "rdma")) {
+			transport = RPC_TRANSPORT_RDMA;
+		} else {
+			nfs_set_error(nfs, "Unknown/unsupported proto : %s", val);
+			return -1;
+		}
+		if (nfs_set_transport(nfs, transport) < 0) {
 			return -1;
 		}
 	} else if (!strcmp(arg, "nfsport")) {
@@ -423,12 +509,36 @@ tohex(char ch)
         return -1;
 }
 
+/* Undo %XX escapes in place; fails on an escaped NUL */
+static int
+nfs_url_unescape(struct nfs_context *nfs, char *str)
+{
+        char *r = str, *w = str;
+
+        while (str && *r) {
+                if (r[0] == '%' && tohex(r[1]) >= 0 && tohex(r[2]) >= 0) {
+                        *w = (char)((tohex(r[1]) << 4) | tohex(r[2]));
+                        if (*w == 0) {
+                                nfs_set_error(nfs, "Invalid URL: escaped NUL");
+                                return -1;
+                        }
+                        w++;
+                        r += 3;
+                } else {
+                        *w++ = *r++;
+                }
+        }
+        if (str) {
+                *w = 0;
+        }
+        return 0;
+}
+
 static struct nfs_url *
 nfs_parse_url(struct nfs_context *nfs, const char *url, int dir, int incomplete)
 {
 	struct nfs_url *urls;
-	char *strp, *flagsp, *strp2, ch, *original_server, *port_str, *slash_pos, *end_ptr;
-        int tmp;
+	char *strp, *flagsp, *strp2, *original_server, *port_str, *slash_pos, *end_ptr;
         size_t port_len;
 
 	if (strncmp(url, "nfs://", 6)) {
@@ -449,30 +559,6 @@ nfs_parse_url(struct nfs_context *nfs, const char *url, int dir, int incomplete)
 		return NULL;
 	}
 
-        /* unescape all % hex hex characters */
-        strp = urls->server;
-        while (strp && *strp) {
-                strp = strchr(strp, '%');
-                if (strp == NULL) {
-                        break;
-                }
-                tmp = tohex(strp[1]);
-                if (tmp < 0) {
-                        strp++;
-                        continue;
-                }
-                ch = (tmp & 0x0f) << 4;
-                tmp = tohex(strp[2]);
-                if (tmp < 0) {
-                        strp++;
-                        continue;
-                }
-                ch |= tmp & 0x0f;
-                *strp = ch;
-                memmove(strp + 1, strp + 3, strlen(strp + 3) + 1);
-                strp++;
-        }
-
 	if (urls->server[0] == '/' || urls->server[0] == '\0' ||
 		urls->server[0] == '?') {
 		if (incomplete) {
@@ -484,7 +570,12 @@ nfs_parse_url(struct nfs_context *nfs, const char *url, int dir, int incomplete)
 		return NULL;
 	}
 
+	/* A port can only follow the host, not appear in the path */
 	strp = strchr(urls->server, ':');
+	slash_pos = strchr(urls->server, '/');
+	if (strp && slash_pos && strp > slash_pos) {
+		strp = NULL;
+	}
         if (strp) {
                 strp++;
                 slash_pos = strchr(strp, '/');
@@ -591,12 +682,18 @@ flags:
 		if (strp2) {
 			*strp2 = 0;
 			strp2++;
+			if (nfs_url_unescape(nfs, strp) ||
+			    nfs_url_unescape(nfs, strp2)) {
+                                nfs_destroy_url(urls);
+				return NULL;
+			}
 			if (nfs_set_context_args(nfs, strp, strp2) != 0) {
                                 nfs_destroy_url(urls);
 				return NULL;
                         }
 		} else {
-			if (nfs_set_context_args_no_val(nfs, strp) != 0) {
+			if (nfs_url_unescape(nfs, strp) ||
+			    nfs_set_context_args_no_val(nfs, strp) != 0) {
                                 nfs_destroy_url(urls);
 				return NULL;
                         }
@@ -606,7 +703,8 @@ flags:
         strp =strchr(urls->server, '@');
         if (strp && nfs->rpc) {
                 *strp++ = '\0';
-                if (rpc_set_username(nfs->rpc, urls->server) != 0) {
+                if (nfs_url_unescape(nfs, urls->server) ||
+                    rpc_set_username(nfs->rpc, urls->server) != 0) {
                         nfs_destroy_url(urls);
                         return NULL;
                 }
@@ -622,6 +720,12 @@ flags:
 		}
                 free(original_server);
         }
+	if (nfs_url_unescape(nfs, urls->server) ||
+	    nfs_url_unescape(nfs, urls->path) ||
+	    nfs_url_unescape(nfs, urls->file)) {
+		nfs_destroy_url(urls);
+		return NULL;
+	}
 	if (urls->server && strlen(urls->server) <= 1) {
 		free(urls->server);
 		urls->server = NULL;
@@ -958,6 +1062,7 @@ rpc_connect_program_4_1_cb(struct rpc_context *rpc, int status,
 	RPC_LOG(rpc, 2, "Got AUTH_TLS response, status=%d", status);
 
 	if (status != RPC_STATUS_SUCCESS) {
+		rpc->tls_context.state = TLS_HANDSHAKE_FAILED;
 		data->cb(rpc, status, command_data, data->private_data);
 		free_tls_cb_data(data);
 		return;
@@ -1145,6 +1250,14 @@ rpc_connect_program_3_cb(struct rpc_context *rpc, int status,
 	if (rpc_port == 0) {
 		rpc_set_error(rpc, "RPC error. Program is not available on %s",
 			      data->server);
+		data->cb(rpc, RPC_STATUS_ERROR, rpc_get_error(rpc),
+			 data->private_data);
+		free_rpc_cb_data(data);
+		return;
+	}
+	if (rpc_port > 65535) {
+		rpc_set_error(rpc, "RPC error. Portmapper on %s returned "
+			      "invalid port %u", data->server, rpc_port);
 		data->cb(rpc, RPC_STATUS_ERROR, rpc_get_error(rpc),
 			 data->private_data);
 		free_rpc_cb_data(data);
@@ -2008,19 +2121,29 @@ int
 nfs_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
                 void *private_data)
 {
+	int ret;
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
-                return nfs3_close_async(nfs, nfsfh, cb, private_data);
+                ret = nfs3_close_async(nfs, nfsfh, cb, private_data);
+                break;
 #ifdef HAVE_NFS4_2
         case NFS_V4_2:
 #endif
         case NFS_V4:
-                return nfs4_close_async(nfs, nfsfh, cb, private_data);
+                ret = nfs4_close_async(nfs, nfsfh, cb, private_data);
+                break;
         default:
                 nfs_set_error(nfs, "%s does not support NFSv%d",
                               __FUNCTION__, nfs->nfsi->version);
-                return -1;
+                ret = -1;
         }
+	/* A queued CLOSE owns the handle until completion. Submission failure
+	 * must consume it here, since no completion callback will run.
+	 */
+	if (ret < 0)
+		nfs_free_nfsfh(nfsfh);
+	return ret;
 }
 
 int
@@ -2362,7 +2485,7 @@ nfs_fallocate_async(struct nfs_context *nfs, struct nfsfh *nfsfh, int mode,
                     uint64_t offset, uint64_t length,
                     nfs_cb cb, void *private_data)
 {
-        if (nfs->nfsi->version != NFS_V4_2) {
+        if (!nfs_is_v4_2(nfs)) {
                 nfs_set_error(nfs, "%s requires NFSv4.2", __FUNCTION__);
                 return -ENOTSUP;
         }
@@ -2392,15 +2515,10 @@ nfs_lseek_async(struct nfs_context *nfs, struct nfsfh *nfsfh, int64_t offset,
          */
         if (whence == SEEK_HOLE || whence == SEEK_DATA) {
                 /*
-                 * NFS_V4_2 does not exist on the platforms that compile the
-                 * dialect out entirely, so the version can not be compared
-                 * against it there.
+                 * NFSv4.1 shares the session dialect with NFSv4.2 but can not
+                 * ask the server for holes, so test the minor version.
                  */
-#ifdef LIBNFS_FEATURE_NFS4_2
-                const int is_v4_2 = (nfs->nfsi->version == NFS_V4_2);
-#else
-                const int is_v4_2 = 0;
-#endif
+                const int is_v4_2 = nfs_is_v4_2(nfs);
 
                 if (!is_v4_2) {
                         nfs_set_error(nfs, "lseek(SEEK_%s) requires NFSv4.2",
@@ -2989,6 +3107,7 @@ nfs_set_version(struct nfs_context *nfs, int version) {
 #endif
 		break;
 #ifdef LIBNFS_FEATURE_NFS4_2
+	case NFS_V4_1:
 	case NFS_V4_2:
 #ifdef HAVE_NFS4_2
 		/*
@@ -3001,7 +3120,7 @@ nfs_set_version(struct nfs_context *nfs, int version) {
 #endif
 		nfs->nfsi->version = NFS_V4_2;
 		nfs->nfsi->default_version = 0;
-		nfs->rpc->nfs4_minorversion = 2;
+		nfs->rpc->nfs4_minorversion = (version == NFS_V4_1) ? 1 : 2;
 		break;
 #else
 		nfs_set_error(nfs, "NFSv4.2 support was not built into this "
@@ -3018,6 +3137,12 @@ nfs_set_version(struct nfs_context *nfs, int version) {
 
 int
 nfs_get_version(struct nfs_context *nfs) {
+#ifdef HAVE_NFS4_2
+        /* nfsi->version is NFS_V4_2 for 4.1 too; report the real one. */
+        if (nfs_has_sessions(nfs) && nfs->rpc->nfs4_minorversion == 1) {
+                return NFS_V4_1;
+        }
+#endif
         return nfs->nfsi->version;
 }
 

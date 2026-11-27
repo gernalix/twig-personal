@@ -49,8 +49,16 @@ connecting to the server/share.
 NFSv4.2 is selected with version=4.2 or nfs_set_version(nfs, NFS_V4_2). It
 adds sparse file support: nfs_fallocate() for reserving, punching and zeroing
 ranges, lseek() with SEEK_HOLE and SEEK_DATA, and the READ_PLUS and
-WRITE_SAME operations. NFSv4.2 support is built by default and can be left
-out with --disable-nfs4-2 (autoconf) or -DENABLE_NFS4_2=OFF (cmake).
+WRITE_SAME operations. Server side copy is available through the COPY,
+COPY_NOTIFY, OFFLOAD_STATUS and OFFLOAD_CANCEL calls in libnfs-raw-nfs4.h.
+NFSv4.2 support is built by default and can be left out with
+--disable-nfs4-2 (autoconf) or -DENABLE_NFS4_2=OFF (cmake).
+
+NFSv4.1 is selected with version=4.1 or nfs_set_version(nfs, NFS_V4_1). It uses
+the same sessions as NFSv4.2 but not the sparse file operations:
+nfs_fallocate() and lseek() with SEEK_HOLE or SEEK_DATA fail with -ENOTSUP. It
+is built with NFSv4.2, so the options above remove both and
+nfs_set_version(nfs, NFS_V4_1) then fails at run time as well.
 
 Applications compile against it behind LIBNFS_FEATURE_NFS4_2, which libnfs.h
 defines wherever the dialect exists at all. As with the other
@@ -58,10 +66,10 @@ LIBNFS_FEATURE_ macros that says the API is there rather than that this
 particular build has it, so a build that dropped the dialect still reports
 that only at run time, by failing nfs_set_version(nfs, NFS_V4_2).
 
-CONCURRENCY AND NFSv4.2:
-------------------------
+CONCURRENCY AND NFSv4.1/4.2:
+----------------------------
 This matters if you drive libnfs hard, and it is the one place where the
-NFSv4.2 dialect behaves differently from NFSv3 and NFSv4.0.
+NFSv4.1 and NFSv4.2 dialect behaves differently from NFSv3 and NFSv4.0.
 
 From NFSv4 minor version 1 onwards every request travels in a session slot,
 and a slot carries one request at a time because the server's reply cache is
@@ -75,13 +83,117 @@ over, so queueing tens of thousands of async calls behaves exactly as it does
 on NFSv3 and NFSv4.0; they are simply released onto the connection as slots
 free up, and nothing is rejected or blocked at submission time.
 
-What it does mean is that NFSv4.2 cannot keep more than the granted number of
-requests at the server simultaneously, where NFSv4.0 has no such bound. If
-your throughput comes from very deep request pipelining rather than from
-large transfers, measure both dialects before choosing; NFSv4.0 may well be
-faster for that shape of workload.
+What it does mean is that NFSv4.1 and NFSv4.2 cannot keep more than the
+granted number of requests at the server simultaneously, where NFSv4.0 has no
+such bound. If your throughput comes from very deep request pipelining rather
+than from large transfers, measure both dialects before choosing; NFSv4.0 may
+well be faster for that shape of workload.
 
 NFSv3 and NFSv4.0 have no sessions and none of this applies to them.
+
+NFSv4.1/4.2 BACK CHANNEL:
+-------------------------
+From NFSv4 minor version 1 onwards the server can send requests to the
+client, callbacks, over the client's own connection. Delegations depend on
+this: a server only grants one when it can recall it with CB_RECALL.
+
+libnfs supports a back channel through the raw API only, and it is off by
+default. Enable it before the session is created, i.e. before nfs_mount():
+
+    rpc_nfs4_enable_backchannel(nfs_get_rpc_context(nfs), my_cb, my_data);
+
+libnfs answers CB_NULL and CB_SEQUENCE, including replays, itself. my_cb is
+called for CB_GETATTR, CB_RECALL, CB_PUSH_DELEG, CB_RECALL_ANY,
+CB_RECALLABLE_OBJ_AVAIL and, on NFSv4.2, CB_OFFLOAD, with the result preset to
+NFS4ERR_NOTSUPP, and sets the result. Other operations get NFS4ERR_NOTSUPP.
+rpc_nfs4_backchannel_is_up() says whether the server accepted the back
+channel.
+
+To ask for a delegation, send OPEN with the OPEN4_SHARE_ACCESS_WANT_* flags,
+or WANT_DELEGATION, through rpc_nfs4_compound_task(). A server that has none
+to give may push one later with CB_PUSH_DELEG, if the OPEN had
+OPEN4_SHARE_ACCESS_WANT_PUSH_DELEG_WHEN_UNCONTENDED, or say with
+CB_RECALLABLE_OBJ_AVAIL that it is worth asking again, if it had
+OPEN4_SHARE_ACCESS_WANT_SIGNAL_DELEG_WHEN_RESRC_AVAIL.
+
+A server that runs a COPY in the background reports its completion with
+CB_OFFLOAD. Without a back channel, poll it with OFFLOAD_STATUS instead.
+
+Restrictions:
+- NFSv4.1 and NFSv4.2 only. NFSv4.0 callbacks would need the client to accept
+  connections from the server.
+- TCP and TLS only, not RDMA.
+- The back channel uses AUTH_NONE, also on a krb5 mount.
+- One callback at a time (one back channel slot).
+- The callback must set the result before it returns and must not block.
+  Do follow-up work, such as DELEGRETURN after CB_RECALL, afterwards.
+  Its arguments are only valid during the call.
+- With a back channel the high-level API asks for no delegations on OPEN,
+  as it cannot handle them. Delegations are only obtained with raw calls.
+- The application has to service the context all the time, not only while
+  its own requests are in flight. The server expects an answer to a callback
+  within the lease period and otherwise revokes the delegation. The sync API
+  only reads the socket while one of its calls runs, so on its own it is not
+  enough. Use one of the two ways below.
+
+1, An event loop (async API)
+Keep the context in the event loop permanently. Get the fd and the events
+again each time round, they change on reconnect, and wake up at least every
+100ms or so to call nfs_service() even without events, as the lease
+keepalive and the timeouts run from there.
+
+    static void my_cb(struct rpc_context *rpc, struct nfs_cb_argop4 *arg,
+                      struct nfs_cb_resop4 *res, void *private_data)
+    {
+            struct my_state *s = private_data;
+
+            if (arg->argop == OP_CB_RECALL) {
+                    s->stateid = arg->nfs_cb_argop4_u.opcbrecall.stateid;
+                    s->recall_pending = 1;
+                    res->nfs_cb_resop4_u.opcbrecall.status = NFS4_OK;
+            }
+    }
+
+    rpc_nfs4_enable_backchannel(nfs_get_rpc_context(nfs), my_cb, &state);
+    nfs_mount_async(nfs, server, export, mount_cb, &state);
+    for (;;) {
+            struct pollfd pfd = { nfs_get_fd(nfs), nfs_which_events(nfs), 0 };
+
+            if (poll(&pfd, 1, 100) < 0 || nfs_service(nfs, pfd.revents) < 0) {
+                    break;
+            }
+            if (state.recall_pending) {
+                    state.recall_pending = 0;
+                    /* your code: PUTFH + DELEGRETURN with rpc_nfs4_compound_task() */
+                    send_delegreturn(nfs_get_rpc_context(nfs), &state);
+            }
+    }
+
+2, The service thread (sync API)
+nfs_mt_service_thread_start() services the context from a thread of its own,
+see README.multithreading. The callback then runs on that thread. It must not
+call any *_sync() function, which would wait for the very thread it runs on.
+It may queue raw *_task() calls.
+
+    static void my_cb(struct rpc_context *rpc, struct nfs_cb_argop4 *arg,
+                      struct nfs_cb_resop4 *res, void *private_data)
+    {
+            if (arg->argop == OP_CB_RECALL) {
+                    res->nfs_cb_resop4_u.opcbrecall.status = NFS4_OK;
+                    send_delegreturn(rpc, &arg->nfs_cb_argop4_u.opcbrecall.stateid);
+            }
+    }
+
+    nfs = nfs_init_context();
+    nfs_set_version(nfs, NFS_V4_2);
+    rpc_nfs4_enable_backchannel(nfs_get_rpc_context(nfs), my_cb, NULL);
+    if (nfs_mount(nfs, server, export) || nfs_mt_service_thread_start(nfs)) {
+            ...
+    }
+    /* use the sync API from any thread */
+    nfs_mt_service_thread_stop(nfs);
+    nfs_umount(nfs);
+    nfs_destroy_context(nfs);
 
 SERVER SUPPORT:
 ===============
@@ -145,6 +257,8 @@ Arguments supported by libnfs are :
 
                      See CERTIFICATES for details about specifying certificates/keys
                      that libnfs must use when using "tls" or "mtls" security.
+ proto=<tcp|rdma>  : Transport for NFS. rdma uses RPC-over-RDMA on port 20049
+                     unless nfsport is given. Default is tcp. See RDMA.
  auto-traverse-mounts=<0|1>
                    : Should libnfs try to traverse across nested mounts
                      automatically or not. Default is 1 == enabled.
@@ -159,11 +273,18 @@ Arguments supported by libnfs are :
                    >=1 : Retry to connect back to the server this many
                          times before failing and returing an error back
                          to the application.
+                     Transient reconnect failures (for example, an unavailable
+                     network) retry after one second while preserving queued
+                     requests. Requests retain their configured timeout/retry
+                     policy (default RPC timeout: 60 seconds), rather than
+                     failing immediately. Keep servicing RPC timers during the
+                     outage. This does not recover expired NFSv4 lease/open state.
  if=<interface>    : Interface name (e.g., eth1) to bind; requires `root`
- version=<3|4|4.2> : NFS Version. Default is 3. 4 is NFSv4.0 and 4.2 is
-                     NFSv4.2; see the NFSv4 section above for what 4.2 adds
-                     and for how its session slots interact with very high
-                     request concurrency.
+ version=<3|4|4.1|4.2>
+                   : NFS Version. Default is 3. 4 is NFSv4.0, 4.1 is NFSv4.1
+                     and 4.2 is NFSv4.2; see the NFSv4 section above for what
+                     4.2 adds and for how the session slots of 4.1 and 4.2
+                     interact with very high request concurrency.
  nfsport=<port>    : Use this port for NFS instead of using the portmapper.
  mountport=<port>  : Use this port for the MOUNT protocol instead of
                      using portmapper. This argument is ignored for NFSv4
@@ -278,6 +399,28 @@ With cmake:
   cmake -DENABLE_KRB5=OFF ..   # never build Kerberos support
 
 
+RDMA
+====
+NFS over RDMA (RPC-over-RDMA version 1, RFC 8166) is built on Linux when the
+librdmacm and libibverbs development files from rdma-core are found, see
+--enable-rdma and -DENABLE_RDMA. It is selected with proto=rdma or
+nfs_set_transport(). MOUNT and PORTMAP still use TCP, so an NFSv3 mount needs
+both.
+
+Only the headers are needed to build. libnfs does not link against librdmacm
+or libibverbs: it loads them with dlopen() the first time an RDMA transport is
+set up. A libnfs built with RDMA support therefore loads and works over TCP on
+a host without rdma-core, and only proto=rdma fails there, with an error naming
+the library that could not be loaded.
+
+READ data is placed directly in the caller's buffer and WRITE data is read
+directly from it, which pins that memory while the call is in flight. Processes
+without CAP_IPC_LOCK are limited by RLIMIT_MEMLOCK, which may need raising for
+many large requests in parallel.
+
+Software iWARP (siw) or RoCE (rxe) is enough for testing:
+  rdma link add siw0 type siw netdev eth0
+
 CERTIFICATES
 ============
 libnfs reads CA certs from the following places, so make sure your server's CA
@@ -358,3 +501,15 @@ MAILING LIST
 A libnfs mailing list is available at http://groups.google.com/group/libnfs
 Announcements of new versions of libnfs will be posted to this list.
 
+
+NFSv4.0 client-state loss
+------------------------
+
+High-level NFSv4.0 operations treat NFS4ERR_STALE_CLIENTID and
+NFS4ERR_EXPIRED as terminal client-state loss.
+The operation callback receives its normal errno; rpc_service()/nfs_service()
+then fails outstanding requests and returns -1 with a client-state diagnostic,
+including when RENEW detects it. This also releases callers waiting on the
+built-in service thread. Stop that thread, if used, destroy the context and
+mount with a fresh one. Transport autoreconnect cannot repair this state.
+Ordinary pathname errors remain per-operation errors.

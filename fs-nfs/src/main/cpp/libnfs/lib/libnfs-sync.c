@@ -208,7 +208,7 @@ wait_for_reply(struct rpc_context *rpc, struct sync_cb_data *cb_data)
 
 	if (rpc->timeout > 0) {
 		timeout = rpc_current_time() + rpc->timeout;
-#ifndef HAVE_CLOCK_GETTIME
+#ifdef RPC_CLOCK_IN_SECONDS
 		/* If we do not have GETTIME we fallback to time() which
 		 * has 1s granularity for its timestamps.
 		 * We thus need to bump the timeout by 1000ms
@@ -244,7 +244,7 @@ wait_for_reply(struct rpc_context *rpc, struct sync_cb_data *cb_data)
 			break;
 		}
 
-		if (rpc_get_fd(rpc) == -1) {
+		if (rpc_get_fd(rpc) == -1 && !rpc->reconnect_due) {
 			rpc_set_error(rpc, "Socket closed");
 			break;
 		}
@@ -262,6 +262,7 @@ wait_for_nfs_reply(struct nfs_context *nfs, struct sync_cb_data *cb_data)
 	struct pollfd pfd;
 	int revents;
 	int ret;
+	int poll_error;
 
 #ifdef HAVE_MULTITHREADING
         if(nfs->rpc->multithreading_enabled) {
@@ -275,21 +276,36 @@ wait_for_nfs_reply(struct nfs_context *nfs, struct sync_cb_data *cb_data)
 		pfd.events = nfs_which_events(nfs);
 		pfd.revents = 0;
 
+		poll_error = 0;
 		ret = poll(&pfd, 1, rpc_get_poll_timeout(nfs->rpc));
 		if (ret < 0) {
-			nfs_set_error(nfs, "Poll failed");
+#ifdef WIN32
+			poll_error = WSAGetLastError();
+#else
+			poll_error = errno;
+#endif
 			revents = -1;
 		} else {
 			revents = pfd.revents;
 		}
 
 		if (nfs_service(nfs, revents) < 0) {
-			if (revents != -1)
-				nfs_set_error(nfs, "nfs_service failed");
+			char error[1024];
+
+			snprintf(error, sizeof(error), "%s", nfs_get_error(nfs));
 			cb_data->status = -EIO;
                         rpc_error_all_pdus(nfs->rpc, "RPC ERROR: Failed to reconnect async");
+			/* Cleanup callbacks can replace the service diagnostic. */
+			if (poll_error)
+				nfs_set_error(nfs, "Poll failed: %s (%d)",
+					      strerror(poll_error), poll_error);
+			else
+				nfs_set_error(nfs, "%s", error);
 			break;
 		}
+		if (poll_error)
+			nfs_set_error(nfs, "Poll failed: %s (%d)",
+					      strerror(poll_error), poll_error);
 	}
 }
 
@@ -916,6 +932,7 @@ nfs_close(struct nfs_context *nfs, struct nfsfh *nfsfh)
 	struct sync_cb_data cb_data;
 
         if (nfs_init_cb_data(&nfs, &cb_data)) {
+                nfs_free_nfsfh(nfsfh);
                 return -1;
         }
 
@@ -2609,6 +2626,269 @@ nfs42_write_same(struct nfs_context *nfs, struct nfsfh *nfsfh,
         nfs_destroy_cb_sem(&cb_data);
 
 	return cb_data.status;
+}
+
+/*
+ * NFSv4.2 COPY, COPY_NOTIFY, OFFLOAD_STATUS and OFFLOAD_CANCEL
+ */
+struct copy_cb_data {
+        struct sync_cb_data cb_data;
+        void *res;
+        int (*copy)(void *dst, void *src);
+};
+
+static int
+nfs42_copy_write_response(write_response4 *dst, write_response4 *src)
+{
+        *dst = *src;
+        dst->wr_callback_id.wr_callback_id_len = 0;
+        dst->wr_callback_id.wr_callback_id_val = NULL;
+        if (src->wr_callback_id.wr_callback_id_len == 0) {
+                return 0;
+        }
+        dst->wr_callback_id.wr_callback_id_val = malloc(sizeof(stateid4));
+        if (dst->wr_callback_id.wr_callback_id_val == NULL) {
+                return -1;
+        }
+        dst->wr_callback_id.wr_callback_id_val[0] =
+                src->wr_callback_id.wr_callback_id_val[0];
+        dst->wr_callback_id.wr_callback_id_len = 1;
+        return 0;
+}
+
+void nfs42_copy_free(COPY4resok *res)
+{
+        free(res->cr_response.wr_callback_id.wr_callback_id_val);
+        res->cr_response.wr_callback_id.wr_callback_id_val = NULL;
+        res->cr_response.wr_callback_id.wr_callback_id_len = 0;
+}
+
+static int
+nfs42_copy_copy(void *dst, void *src)
+{
+        COPY4resok *d = dst, *s = src;
+
+        d->cr_requirements = s->cr_requirements;
+        return nfs42_copy_write_response(&d->cr_response, &s->cr_response);
+}
+
+static void
+nfs42_netloc_free(netloc4 *nl)
+{
+        switch (nl->nl_type) {
+        case NL4_NAME:
+                free(nl->netloc4_u.nl_name.utf8string_val);
+                break;
+        case NL4_URL:
+                free(nl->netloc4_u.nl_url.utf8string_val);
+                break;
+        case NL4_NETADDR:
+                free(nl->netloc4_u.nl_addr.na_r_netid);
+                free(nl->netloc4_u.nl_addr.na_r_addr);
+                break;
+        }
+}
+
+static int
+nfs42_netloc_copy(netloc4 *dst, netloc4 *src)
+{
+        utf8string *ds = NULL, *ss = NULL;
+
+        memset(dst, 0, sizeof(*dst));
+        dst->nl_type = src->nl_type;
+        switch (src->nl_type) {
+        case NL4_NAME:
+                ds = &dst->netloc4_u.nl_name;
+                ss = &src->netloc4_u.nl_name;
+                break;
+        case NL4_URL:
+                ds = &dst->netloc4_u.nl_url;
+                ss = &src->netloc4_u.nl_url;
+                break;
+        case NL4_NETADDR:
+                dst->netloc4_u.nl_addr.na_r_netid =
+                        strdup(src->netloc4_u.nl_addr.na_r_netid);
+                dst->netloc4_u.nl_addr.na_r_addr =
+                        strdup(src->netloc4_u.nl_addr.na_r_addr);
+                if (dst->netloc4_u.nl_addr.na_r_netid == NULL ||
+                    dst->netloc4_u.nl_addr.na_r_addr == NULL) {
+                        nfs42_netloc_free(dst);
+                        return -1;
+                }
+                return 0;
+        }
+        if (ds == NULL) {
+                return 0;
+        }
+        ds->utf8string_val = malloc(ss->utf8string_len ? ss->utf8string_len : 1);
+        if (ds->utf8string_val == NULL) {
+                return -1;
+        }
+        memcpy(ds->utf8string_val, ss->utf8string_val, ss->utf8string_len);
+        ds->utf8string_len = ss->utf8string_len;
+        return 0;
+}
+
+void nfs42_copy_notify_free(COPY_NOTIFY4resok *res)
+{
+        uint32_t i;
+
+        for (i = 0; i < res->cnr_source_server.cnr_source_server_len; i++) {
+                nfs42_netloc_free(&res->cnr_source_server.cnr_source_server_val[i]);
+        }
+        free(res->cnr_source_server.cnr_source_server_val);
+        res->cnr_source_server.cnr_source_server_val = NULL;
+        res->cnr_source_server.cnr_source_server_len = 0;
+}
+
+static int
+nfs42_copy_notify_copy(void *dst, void *src)
+{
+        COPY_NOTIFY4resok *d = dst, *s = src;
+        uint32_t i, n = s->cnr_source_server.cnr_source_server_len;
+
+        d->cnr_lease_time = s->cnr_lease_time;
+        d->cnr_stateid = s->cnr_stateid;
+        d->cnr_source_server.cnr_source_server_len = 0;
+        d->cnr_source_server.cnr_source_server_val = calloc(n ? n : 1,
+                                                            sizeof(netloc4));
+        if (d->cnr_source_server.cnr_source_server_val == NULL) {
+                return -1;
+        }
+        for (i = 0; i < n; i++) {
+                if (nfs42_netloc_copy(&d->cnr_source_server.cnr_source_server_val[i],
+                                      &s->cnr_source_server.cnr_source_server_val[i])) {
+                        nfs42_copy_notify_free(d);
+                        return -1;
+                }
+                d->cnr_source_server.cnr_source_server_len = i + 1;
+        }
+        return 0;
+}
+
+void nfs42_offload_status_free(OFFLOAD_STATUS4resok *res)
+{
+        free(res->osr_complete.osr_complete_val);
+        res->osr_complete.osr_complete_val = NULL;
+        res->osr_complete.osr_complete_len = 0;
+}
+
+static int
+nfs42_offload_status_copy(void *dst, void *src)
+{
+        OFFLOAD_STATUS4resok *d = dst, *s = src;
+
+        d->osr_count = s->osr_count;
+        d->osr_complete.osr_complete_len = 0;
+        d->osr_complete.osr_complete_val = NULL;
+        if (s->osr_complete.osr_complete_len == 0) {
+                return 0;
+        }
+        d->osr_complete.osr_complete_val = malloc(sizeof(nfsstat4));
+        if (d->osr_complete.osr_complete_val == NULL) {
+                return -1;
+        }
+        d->osr_complete.osr_complete_val[0] = s->osr_complete.osr_complete_val[0];
+        d->osr_complete.osr_complete_len = 1;
+        return 0;
+}
+
+static void
+nfs42_copy_sync_cb(int status, struct nfs_context *nfs, void *data,
+                   void *private_data)
+{
+        struct copy_cb_data *c = private_data;
+
+        /* The reply is released when this returns. */
+        if (status == 0 && c->copy && c->copy(c->res, data)) {
+                nfs_set_error(nfs, "Out of memory");
+                status = -ENOMEM;
+        }
+        cb_data_is_finished(&c->cb_data, status);
+}
+
+static int
+nfs42_copy_wait(struct nfs_context *nfs, struct copy_cb_data *c, int ret)
+{
+        if (ret != 0) {
+                nfs_destroy_cb_sem(&c->cb_data);
+                return ret < 0 ? ret : -1;
+        }
+        wait_for_nfs_reply(nfs, &c->cb_data);
+        nfs_destroy_cb_sem(&c->cb_data);
+
+        return c->cb_data.status;
+}
+
+int
+nfs42_copy(struct nfs_context *nfs,
+           struct nfsfh *src, uint64_t src_offset,
+           struct nfsfh *dst, uint64_t dst_offset,
+           uint64_t count, int synchronous,
+           COPY_NOTIFY4resok *notify, COPY4resok *res)
+{
+        struct copy_cb_data c;
+
+        memset(res, 0, sizeof(*res));
+        c.res = res;
+        c.copy = nfs42_copy_copy;
+        if (nfs_init_cb_data(&nfs, &c.cb_data)) {
+                return -1;
+        }
+        return nfs42_copy_wait(nfs, &c,
+                nfs42_copy_async(nfs, src, src_offset, dst, dst_offset,
+                                 count, synchronous, notify,
+                                 nfs42_copy_sync_cb, &c));
+}
+
+int
+nfs42_copy_notify(struct nfs_context *nfs, struct nfsfh *src,
+                  netloc4 *destination, COPY_NOTIFY4resok *res)
+{
+        struct copy_cb_data c;
+
+        memset(res, 0, sizeof(*res));
+        c.res = res;
+        c.copy = nfs42_copy_notify_copy;
+        if (nfs_init_cb_data(&nfs, &c.cb_data)) {
+                return -1;
+        }
+        return nfs42_copy_wait(nfs, &c,
+                nfs42_copy_notify_async(nfs, src, destination,
+                                        nfs42_copy_sync_cb, &c));
+}
+
+int
+nfs42_offload_status(struct nfs_context *nfs, struct nfsfh *fh,
+                     const stateid4 *stateid, OFFLOAD_STATUS4resok *res)
+{
+        struct copy_cb_data c;
+
+        memset(res, 0, sizeof(*res));
+        c.res = res;
+        c.copy = nfs42_offload_status_copy;
+        if (nfs_init_cb_data(&nfs, &c.cb_data)) {
+                return -1;
+        }
+        return nfs42_copy_wait(nfs, &c,
+                nfs42_offload_status_async(nfs, fh, stateid,
+                                           nfs42_copy_sync_cb, &c));
+}
+
+int
+nfs42_offload_cancel(struct nfs_context *nfs, struct nfsfh *fh,
+                     const stateid4 *stateid)
+{
+        struct copy_cb_data c;
+
+        c.res = NULL;
+        c.copy = NULL;
+        if (nfs_init_cb_data(&nfs, &c.cb_data)) {
+                return -1;
+        }
+        return nfs42_copy_wait(nfs, &c,
+                nfs42_offload_cancel_async(nfs, fh, stateid,
+                                           nfs42_copy_sync_cb, &c));
 }
 #endif /* HAVE_NFS4_2 */
 

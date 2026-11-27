@@ -115,6 +115,9 @@ rpc_reconnect_requeue(struct rpc_context *rpc);
 static int
 rpc_set_sockaddr(struct rpc_context *rpc, const char *server, int port);
 
+static void reconnect_cb(struct rpc_context *, int, void *, void *);
+static int rpc_reconnect_failed(struct rpc_context *, int);
+
 #ifdef HAVE_NFS4_2
 static void
 rpc_nfs4_rebind_session(struct rpc_context *rpc);
@@ -281,6 +284,10 @@ rpc_get_fd(struct rpc_context *rpc)
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
+#if defined(WIN32) || defined(PS3_PPU) || defined(PS2_EE)
+	if (rpc->reconnect_due)
+		return -1;
+#endif
 	if (rpc->old_fd) {
 		return rpc->old_fd;
 	}
@@ -392,6 +399,13 @@ rpc_which_events(struct rpc_context *rpc)
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
+	if (rpc->reconnect_due) {
+		return 0;
+	}
+	/* Sends never wait for POLLOUT, everything arrives on the epoll fd */
+	if (rpc_is_rdma(rpc)) {
+		return POLLIN;
+	}
 	events = rpc->is_connected ? POLLIN : POLLOUT;
 
 	if (rpc->is_udp != 0) {
@@ -428,6 +442,60 @@ rpc_disable_socket(struct rpc_context *rpc, int val)
         rpc->socket_disabled = val;
 }
 
+/* Head of outqueue fully sent, move it to waitpdu. Returns 1 if it was freed. */
+int
+rpc_outqueue_sent(struct rpc_context *rpc, struct rpc_pdu *pdu)
+{
+        unsigned int hash;
+
+        assert(rpc->outqueue.head == pdu);
+
+        pdu->out.num_done = pdu->out.total_size;
+#ifdef HAVE_NFS4_2
+        pdu->nfs4_slot_sent = 1;
+#endif /* HAVE_NFS4_2 */
+
+        rpc->outqueue.head = pdu->next;
+        if (rpc->outqueue.head == NULL)
+                rpc->outqueue.tail = NULL;
+
+        /*
+         * We just dequeued the last high priority pdu,
+         * the high priority run is now empty.
+         */
+        if (rpc->outqueue.tailp == pdu)
+                rpc->outqueue.tailp = NULL;
+
+        assert(rpc->stats.outqueue_len > 0);
+        rpc->stats.outqueue_len--;
+
+        /* RPC sent, original or retransmit */
+        INC_STATS(rpc, num_req_sent);
+
+#ifdef HAVE_CLOCK_GETTIME
+        /*
+         * Now this RPC is completely written over the socket.
+         * Note current wallclock time as the dispatch time.
+         */
+        pdu->dispatch_usecs = rpc_wallclock_time();
+#endif
+
+        if (pdu->discard_after_sending) {
+                rpc_free_pdu(rpc, pdu);
+                return 1;
+        }
+
+        hash = rpc_hash_xid(rpc, pdu->xid);
+        rpc_enqueue(&rpc->waitpdu[hash], pdu);
+        rpc->waitpdu_len++;
+
+        pdu->pdu_stats.send_timestamp = rpc_current_time_us();
+        if (rpc->stats_cb) {
+                rpc->stats_cb(rpc, &pdu->pdu_stats, rpc->stats_private_data);
+        }
+        return 0;
+}
+
 int
 rpc_write_to_socket(struct rpc_context *rpc)
 {
@@ -441,10 +509,22 @@ rpc_write_to_socket(struct rpc_context *rpc)
         if (rpc->socket_disabled) {
                 return 0;
         }
+#ifdef HAVE_RDMA
+        if (rpc->is_rdma) {
+                return rpc_rdma_write(rpc);
+        }
+#endif /* HAVE_RDMA */
 	if (rpc->fd == -1) {
 		rpc_set_error(rpc, "trying to write but not connected");
 		return -1;
 	}
+#ifdef HAVE_TLS
+	/* The AUTH_TLS probe is written by rpc_queue_pdu2(), not from here. */
+	if (rpc->use_tls &&
+	    rpc->tls_context.state != TLS_HANDSHAKE_COMPLETED) {
+		return 0;
+	}
+#endif /* HAVE_TLS */
 
 #ifdef HAVE_MULTITHREADING
         if (rpc->multithreading_enabled) {
@@ -596,53 +676,11 @@ rpc_write_to_socket(struct rpc_context *rpc)
                 while (count > 0 && (pdu = rpc->outqueue.head) != NULL) {
                         size_t remaining = (pdu->out.total_size - pdu->out.num_done);
                         if (remaining <= count) {
-                                unsigned int hash;
-
                                 count -= remaining;
 
-                                pdu->out.num_done = pdu->out.total_size;
-#ifdef HAVE_NFS4_2
-                                pdu->nfs4_slot_sent = 1;
-#endif /* HAVE_NFS4_2 */
-
-                                rpc->outqueue.head = pdu->next;
-                                if (rpc->outqueue.head == NULL)
-                                        rpc->outqueue.tail = NULL;
-
-                                /*
-                                 * We just dequeued the last high priority pdu,
-                                 * the high priority run is now empty.
-                                 */
-                                if (rpc->outqueue.tailp == pdu)
-                                        rpc->outqueue.tailp = NULL;
-
-                                assert(rpc->stats.outqueue_len > 0);
-                                rpc->stats.outqueue_len--;
-
-                                /* RPC sent, original or retransmit */
-                                INC_STATS(rpc, num_req_sent);
-
-#ifdef HAVE_CLOCK_GETTIME
-                                /*
-                                 * Now this RPC is completely written over the socket.
-                                 * Note current wallclock time as the dispatch time.
-                                 */
-                                pdu->dispatch_usecs = rpc_wallclock_time();
-#endif
-
-                                if (pdu->discard_after_sending) {
-                                        rpc_free_pdu(rpc, pdu);
+                                if (rpc_outqueue_sent(rpc, pdu)) {
                                         ret = 0;
                                         goto finished;
-                                }
-
-                                hash = rpc_hash_xid(rpc, pdu->xid);
-                                rpc_enqueue(&rpc->waitpdu[hash], pdu);
-                                rpc->waitpdu_len++;
-
-                                pdu->pdu_stats.send_timestamp = rpc_current_time_us();
-                                if (rpc->stats_cb) {
-                                        rpc->stats_cb(rpc, &pdu->pdu_stats, rpc->stats_private_data);
                                 }
                         } else {
                                 pdu->out.num_done += count;
@@ -668,6 +706,21 @@ rpc_write_to_socket(struct rpc_context *rpc)
         }
 
 	return ret;
+}
+
+/*
+ * With a back channel the server sends CALLs on our connection, with xids of
+ * its own choosing, so the message type has to be read before the xid can be
+ * matched against our requests.
+ */
+static int rpc_may_get_calls(struct rpc_context *rpc)
+{
+#ifdef HAVE_NFS4_2
+        return !rpc->is_server_context && rpc->nfs4_cb_fn != NULL;
+#else
+        (void)rpc;
+        return 0;
+#endif
 }
 
 static int adjust_inbuf(struct rpc_context *rpc, uint32_t pdu_size)
@@ -731,13 +784,19 @@ static char *rpc_reassemble_pdu(struct rpc_context *rpc, uint32_t *pdu_size)
         return reasbuf;
 }
 
-static void rpc_finished_pdu(struct rpc_context *rpc)
+void rpc_finished_pdu(struct rpc_context *rpc)
 {
         if (rpc->pdu && rpc->pdu->free_pdu) {
                 /*
                  * For zero-copy read, this is where we call the user callback.
                  */
-                rpc->pdu->cb(rpc, RPC_STATUS_SUCCESS, rpc->pdu->zdr_decode_buf, rpc->pdu->private_data);
+                if (rpc->pdu->zero_copy_error) {
+                        rpc->pdu->cb(rpc, RPC_STATUS_ERROR,
+                                     (void *)rpc->pdu->zero_copy_error,
+                                     rpc->pdu->private_data);
+                } else {
+                        rpc->pdu->cb(rpc, RPC_STATUS_SUCCESS, rpc->pdu->zdr_decode_buf, rpc->pdu->private_data);
+                }
         }
         if (rpc->pdu && rpc->pdu->free_zdr) {
                 zdr_destroy(&rpc->pdu->zdr);
@@ -770,7 +829,7 @@ rpc_read_from_socket(struct rpc_context *rpc)
 {
 	ssize_t count;
         int pos;
-        uint32_t inbuf_size;
+        uint32_t inbuf_size, prefetch;
         int saved_fd = rpc->fd;
         int saved_is_connected = rpc->is_connected;
 
@@ -842,6 +901,11 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                       strerror(errno));
 			return -1;
 		}
+		/* Too short to hold an xid */
+		if (count < 4) {
+			free(buf);
+			return 0;
+		}
 		if (!rpc->is_server_context) {
 			rpc->rm_xid[0] = count;
 			rpc->rm_xid[1] = ntohl(*(uint32_t *)(void *)&buf[0]);
@@ -898,9 +962,10 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                 /*
                                  * Read record marker,
                                  * And if this is a cleint context read the next 4 bytes
-                                 * i.e. the XID on a client
+                                 * i.e. the XID on a client, and the msg_type
+                                 * after it if the server may send calls.
                                  */
-                                rpc->pdu_size = 8;
+                                rpc->pdu_size = rpc_may_get_calls(rpc) ? 12 : 8;
                                 rpc->buf = (char *)&rpc->rm_xid[0];
                                 rpc->pdu = NULL;
                                 break;
@@ -923,9 +988,12 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                 /* We do not have rpc->pdu for server context */
 #ifdef HAVE_LIBKRB5
                                 /*
-                                 * KRB5P can not use zero-copy reads
+                                 * KRB5I and KRB5P can not use zero-copy
+                                 * reads, the whole reply has to be in the
+                                 * buffer to verify it or to unwrap it.
                                  */
-                                if (rpc->sec != RPC_SEC_KRB5P)
+                                if (rpc->sec == RPC_SEC_UNDEFINED ||
+                                    rpc->sec == RPC_SEC_KRB5)
 #endif /* HAVE_LIBKRB5 */
                                         if (rpc->pdu && rpc->pdu->in.base &&
                                             !rpc->fragments && rpc->pdu_size > ZCRP) {
@@ -1063,10 +1131,15 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                         continue;
                                 }
 
-                                if (rpc->rm_xid[0] < 8 || rpc->rm_xid[0] > MAX_FRAGMENT_SIZE) {
+                                /* Bytes read past the marker. */
+                                prefetch = rpc->pdu_size - 4;
+                                if (rpc->rm_xid[0] < (prefetch == 8 ? 12 : 8) ||
+                                    rpc->rm_xid[0] > MAX_FRAGMENT_SIZE) {
                                         rpc_set_error(rpc, "Invalid recordmarker size");
                                         return -1;
                                 }
+                                rpc->reading_call = prefetch == 8 &&
+                                        ntohl(rpc->rm_xid[2]) == CALL;
 
                                 /*
                                  * When performing zero-copy read we read just ZCRP bytes
@@ -1082,11 +1155,12 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                 inbuf_size = rpc->rm_xid[0];
 
                                 rpc->rm_xid[1] = ntohl(rpc->rm_xid[1]);
-                                if (!rpc->is_server_context) {
-                                        rpc->pdu = rpc_find_pdu(rpc, rpc->rm_xid[1]);
+                                if (!rpc->is_server_context && !rpc->reading_call) {
+                                        rpc->pdu = rpc_find_reply_pdu(rpc, rpc->rm_xid[1]);
 
 #ifdef HAVE_LIBKRB5
-                                        if (rpc->sec != RPC_SEC_KRB5P)
+                                        if (rpc->sec == RPC_SEC_UNDEFINED ||
+                                            rpc->sec == RPC_SEC_KRB5)
 #endif /* HAVE_LIBKRB5 */
                                                 if (rpc->state != READ_FRAGMENT &&
                                                     !rpc->fragments &&
@@ -1127,17 +1201,20 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                         return -1;
                                 }
 
-                                /* Copy the next 4 bytes into inbuf */
+                                /* Copy the prefetched bytes into inbuf */
                                 *((uint32_t *)(void *)rpc->inbuf) = htonl(rpc->rm_xid[1]);
+                                if (prefetch == 8) {
+                                        memcpy(rpc->inbuf + 4, &rpc->rm_xid[2], 4);
+                                }
 
                                 /* but set inpos to 0, we will update it above
-                                 * that we have already read these 4 bytes in
+                                 * that we have already read these bytes in
                                  * PAYLOAD and FRAGMENT
                                  */
-                                rpc->rm_prefetch = 4;
+                                rpc->rm_prefetch = prefetch;
                                 rpc->inpos = 0;   
 
-                                if (!rpc->is_server_context) {
+                                if (!rpc->is_server_context && !rpc->reading_call) {
                                         /* Unknown xid, either unsolicited
                                          * or an xid we have cancelled
                                          */
@@ -1168,6 +1245,30 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                 } else {
                                         rpc->buf = rpc->inbuf;
                                 }
+#ifdef HAVE_NFS4_2
+                                if (rpc->reading_call) {
+                                        int ret;
+
+                                        rpc->reading_call = 0;
+                                        rpc->state = READ_RM;
+                                        rpc->inpos = 0;
+                                        ret = nfs4_cb_process_call(rpc, rpc->buf,
+                                                                   rpc->pdu_size);
+                                        if (rpc->fragments) {
+                                                free(rpc->buf);
+                                                rpc->buf = NULL;
+                                                rpc_free_all_fragments(rpc);
+                                        }
+                                        if (ret != 0) {
+                                                return -1;
+                                        }
+                                        if (rpc->fd != saved_fd ||
+                                            rpc->is_connected != saved_is_connected) {
+                                                return 0;
+                                        }
+                                        break;
+                                }
+#endif /* HAVE_NFS4_2 */
                                 if (rpc->pdu) {
                                 	/* pdu_size is the RPC message length; +4 for record marker */
                                 	rpc->pdu->resp_size = rpc->pdu_size + 4;
@@ -1205,10 +1306,11 @@ rpc_read_from_socket(struct rpc_context *rpc)
 #ifdef HAVE_LIBKRB5
                                 /*
                                  * Since we don't do zero-copy reads for
-                                 * KRB5P we are basically finished processing
-                                 * the reply at this point.
+                                 * KRB5I/KRB5P we are basically finished
+                                 * processing the reply at this point.
                                  */
-                                if (rpc->sec == RPC_SEC_KRB5P) {
+                                if (rpc->sec == RPC_SEC_KRB5I ||
+                                    rpc->sec == RPC_SEC_KRB5P) {
                                         goto payload_finished;
                                 }
 #endif /* HAVE_LIBKRB5 */
@@ -1240,8 +1342,14 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                          * pdu->read_count is the amount of read data returned by
                                          * the server in this RPC response.
                                          */
-                                        if (!zdr_uint32_t(&rpc->pdu->zdr, &rpc->pdu->read_count))
+                                        if (!zdr_uint32_t(&rpc->pdu->zdr, &rpc->pdu->read_count)) {
+                                                if (rpc->fragments) {
+                                                        free(rpc->buf);
+                                                        rpc->buf = NULL;
+                                                        rpc_free_all_fragments(rpc);
+                                                }
                                                 return -1;
+                                        }
 
                                         /*
                                          * Now pos is pointing at the start of data, and
@@ -1308,6 +1416,13 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                                 rpc_free_all_fragments(rpc);
                                                 return -1;
                                         } else {
+                                                if (rpc->pdu->read_count - count >
+                                                    rpc->rm_xid[0] - (pos + count)) {
+                                                        rpc_set_error(rpc, "READ reply declares "
+                                                                      "more data than its "
+                                                                      "record holds");
+                                                        return -1;
+                                                }
                                                 rpc->pdu->read_count -= count;
                                                 rpc->state = READ_IOVEC;
                                                 rpc->inpos  = 0;
@@ -1320,8 +1435,18 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                         free(rpc->buf);
                                         rpc->buf = NULL;
                                         rpc_free_all_fragments(rpc);
+                                        count = 0;
+                                } else {
+                                        /* Unread tail of a zero-copy reply we did not copy */
+                                        count = rpc->rm_xid[0] - rpc->pdu_size;
                                 }
                                 rpc_finished_pdu(rpc);
+                                if (count > 0 && rpc->fd == saved_fd) {
+                                        rpc->rm_xid[0] = count;
+                                        rpc->state = READ_PADDING;
+                                        rpc->inpos = 0;
+                                        continue;
+                                }
                                 break;
                         case READ_IOVEC:
                                 rpc->pdu->read_count -= rpc->pdu_size;
@@ -1509,6 +1634,14 @@ rpc_timeout_scan(struct rpc_context *rpc)
 				}
 				/* Reset the RPC timeout values as appropriate */
 				pdu_set_timeout(rpc, pdu, t);
+
+#ifdef HAVE_RDMA
+				/* RPC-over-RDMA only retransmits on a new connection */
+				if (rpc->is_rdma) {
+					rpc_rdma_release_pdu(rpc, pdu);
+					need_reconnect = TRUE;
+				}
+#endif /* HAVE_RDMA */
 
 				/* queue it back to outqueue for retransmit */
 				rpc_return_to_outqueue(rpc, pdu);
@@ -1717,6 +1850,7 @@ nfs40_renew_cb(struct rpc_context *rpc, int status, void *command_data,
 		RPC_LOG(rpc, 2, "NFSv4.0 lease renewed");
 	} else if (res && (res->status == NFS4ERR_EXPIRED ||
 	                   res->status == NFS4ERR_STALE_CLIENTID)) {
+		rpc->nfs40_state_error = res->status;
 		nfs40_stop_renew_locked(rpc);
 		nfs40_renew_unlock(rpc);
 		RPC_LOG(rpc, 1, "NFSv4.0 lease lost (%s); context must be remounted",
@@ -1801,10 +1935,44 @@ rpc_nfs40_maybe_renew(struct rpc_context *rpc)
 	RPC_LOG(rpc, 2, "Queued NFSv4.0 RENEW");
 }
 
+/* State recovery is not implemented. Report a terminal context failure only
+ * after reply callbacks have returned, never by destroying state in a callback.
+ */
+static int
+rpc_nfs40_check_state(struct rpc_context *rpc)
+{
+	char error[160];
+
+	if (!rpc->nfs40_state_error)
+		return 0;
+	rpc_nfs40_stop_renew(rpc);
+	snprintf(error, sizeof(error),
+	         "NFSv4.0 client state lost: %s (%u); recreate the context",
+	         nfsstat4_to_str(rpc->nfs40_state_error), rpc->nfs40_state_error);
+	/* Wake pending synchronous/background callers too. Cleanup callbacks may
+	 * change diagnostics, so publish the terminal reason after draining work.
+	 */
+	rpc_error_all_pdus(rpc, error);
+	rpc_set_error(rpc, "%s", error);
+	return -1;
+}
+
 int
 rpc_service(struct rpc_context *rpc, int revents)
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+	if (rpc_nfs40_check_state(rpc) < 0)
+		return -1;
+
+	if (rpc->reconnect_due) {
+		/* Requests are back in outqueue; honor their timeout policy
+		 * without letting a retry bypass the transport backoff. */
+		rpc_timeout_scan(rpc);
+		if (!rpc->reconnect_due || rpc_current_time() < rpc->reconnect_due)
+			return 0;
+		rpc->reconnect_due = 0;
+		return rpc_reconnect_requeue(rpc);
+	}
 
 #ifdef HAVE_NFS4_2
         nfs4_service_delayed(rpc);
@@ -1819,20 +1987,51 @@ rpc_service(struct rpc_context *rpc, int revents)
 	if (rpc_timeout_scan(rpc) != 0) {
 		return rpc_reconnect_requeue(rpc);
 	}
+	if (rpc->reconnect_due) {
+		/* An AUTH_TLS probe timed out and gave up the connection */
+		return 0;
+	}
 	rpc_nfs40_maybe_renew(rpc);
 
 #ifdef HAVE_NFS4_2
 	rpc_nfs4_maybe_renew_session(rpc);
 #endif /* HAVE_NFS4_2 */
 
+#ifdef HAVE_RDMA
+	if (rpc->is_rdma) {
+		int err = 0;
+
+		switch (rpc_rdma_service(rpc, &err)) {
+		case RPC_RDMA_EV_NONE:
+			break;
+		case RPC_RDMA_EV_CONNECTED:
+			rpc->is_connected = 1;
+			RPC_LOG(rpc, 2, "RDMA connection established");
+			maybe_call_connect_cb(rpc, RPC_STATUS_SUCCESS);
+			break;
+		case RPC_RDMA_EV_CONNECT_FAILED:
+			if (rpc->connect_cb == reconnect_cb)
+				return rpc_reconnect_failed(rpc, err);
+			maybe_call_connect_cb(rpc, RPC_STATUS_ERROR);
+			return -1;
+		case RPC_RDMA_EV_DISCONNECTED:
+			return rpc_reconnect_requeue(rpc);
+		}
+		if (rpc_nfs40_check_state(rpc) < 0)
+			return -1;
+		if (rpc->is_rdma && rpc->is_connected &&
+		    rpc_outqueue_present(rpc) && rpc_write_to_socket(rpc) != 0) {
+			return rpc_reconnect_requeue(rpc);
+		}
+		return 0;
+	}
+#endif /* HAVE_RDMA */
+
 	if (revents == -1 || revents & (POLLERR|POLLHUP)) {
+		int connect_error = 0;
 		if (revents != -1 && revents & POLLERR) {
 
-#ifdef WIN32
-			char err = 0;
-#else
 			int err = 0;
-#endif
 			socklen_t err_size = sizeof(err);
 
 			if (getsockopt(rpc->fd, SOL_SOCKET, SO_ERROR,
@@ -1840,6 +2039,7 @@ rpc_service(struct rpc_context *rpc, int revents)
 				if (err == 0) {
 					err = errno;
 				}
+				connect_error = err;
 				rpc_set_error(rpc, "rpc_service: socket error "
 						    "%s(%d).",
 						    strerror(err), err);
@@ -1848,9 +2048,17 @@ rpc_service(struct rpc_context *rpc, int revents)
 						   "Unknown socket error.");
 			}
 		} else if (revents != -1 && revents & POLLHUP) {
+#ifdef WIN32
+			connect_error = WSAECONNRESET;
+#else
+			connect_error = ECONNRESET;
+#endif
 			rpc_set_error(rpc, "Socket failed with POLLHUP");
 		}
 		if (rpc->auto_reconnect) {
+			if (!rpc->is_connected && rpc->connect_cb == reconnect_cb &&
+			    connect_error != 0)
+				return rpc_reconnect_failed(rpc, connect_error);
 			return rpc_reconnect_requeue(rpc);
 		}
 		rpc_nfs40_stop_renew(rpc);
@@ -1871,6 +2079,8 @@ rpc_service(struct rpc_context *rpc, int revents)
 			rpc_set_error(rpc, "rpc_service: socket error "
 				  	"%s(%d) while connecting.",
 					strerror(err), err);
+			if (rpc->connect_cb == reconnect_cb)
+				return rpc_reconnect_failed(rpc, err);
 			maybe_call_connect_cb(rpc, RPC_STATUS_ERROR);
 			return -1;
 		}
@@ -1955,6 +2165,9 @@ rpc_service(struct rpc_context *rpc, int revents)
 		}
 	}
 
+	if (rpc_nfs40_check_state(rpc) < 0)
+		return -1;
+
 #ifdef HAVE_TLS
 	/*
 	 * For secure NFS connections we should never write to the socket w/o
@@ -2031,6 +2244,7 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 {
         struct sockaddr_storage *s = &rpc->s;
         socklen_t socksize;
+	rpc->connect_errno = 0;
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
@@ -2062,6 +2276,12 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 			return -1;
 		}
 	}
+
+#ifdef HAVE_RDMA
+	if (rpc->is_rdma) {
+		return rpc_rdma_connect(rpc);
+	}
+#endif /* HAVE_RDMA */
 
 	switch (s->ss_family) {
 	case AF_INET:
@@ -2122,6 +2342,10 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 		}
 		close(rpc->fd);
 		rpc->fd = rpc->old_fd;
+		if (rpc->reconnect_write_fd != -1) {
+			close(rpc->reconnect_write_fd);
+			rpc->reconnect_write_fd = -1;
+		}
 #else
 		/* On Windows dup2 does not work on sockets
 		 * instead just close the old socket */
@@ -2225,8 +2449,9 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 
 	if (connect(rpc->fd, (struct sockaddr *)s, socksize) != 0 &&
             errno != EINPROGRESS) {
+		rpc->connect_errno = errno;
 		rpc_set_error(rpc, "connect() to server failed. %s(%d)",
-                              strerror(errno), errno);
+			      strerror(rpc->connect_errno), rpc->connect_errno);
 		return -1;
 	}
 
@@ -2345,6 +2570,19 @@ rpc_connect_async(struct rpc_context *rpc, const char *server, int port,
 
 	rpc->auto_reconnect = 0;
 
+#ifdef HAVE_RDMA
+	rpc->is_rdma = rpc->wanted_transport == RPC_TRANSPORT_RDMA &&
+		rpc->program == NFS_PROGRAM;
+#ifdef HAVE_TLS
+	if (rpc->is_rdma && (rpc->wanted_xprtsec == RPC_XPRTSEC_TLS ||
+			     rpc->wanted_xprtsec == RPC_XPRTSEC_MTLS)) {
+		rpc->is_rdma = 0;
+		rpc_set_error(rpc, "xprtsec=tls/mtls is not supported with proto=rdma");
+		return -1;
+	}
+#endif /* HAVE_TLS */
+#endif /* HAVE_RDMA */
+
         if (rpc_set_sockaddr(rpc, server, port) != 0) {
                 return -1;
         }
@@ -2363,16 +2601,33 @@ rpc_connect_async(struct rpc_context *rpc, const char *server, int port,
 int
 rpc_disconnect(struct rpc_context *rpc, const char *error)
 {
-	assert(rpc->magic == RPC_CONTEXT_MAGIC);
-	rpc_nfs40_stop_renew(rpc);
+	int reconnecting;
 
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+	reconnecting = rpc->reconnect_due || rpc->connect_cb == reconnect_cb;
+	rpc_nfs40_stop_renew(rpc);
+	rpc->reconnect_due = 0;
+	if (rpc->reconnect_write_fd != -1) {
+		close(rpc->reconnect_write_fd);
+		rpc->reconnect_write_fd = -1;
+	}
+	if (rpc->old_fd && rpc->old_fd != rpc->fd)
+		close(rpc->old_fd);
+
+#ifdef HAVE_RDMA
+	rpc_rdma_teardown(rpc);
+	rpc->is_rdma = 0;
+#endif /* HAVE_RDMA */
 	if (rpc->fd != -1) {
 		close(rpc->fd);
 		rpc->fd  = -1;
 	}
+	rpc->old_fd = 0;
 
 	/* Do not re-disconnect if we are already disconnected */
 	if (!rpc->is_connected) {
+		if (reconnecting)
+			rpc_error_all_pdus(rpc, error);
 		/* but a connect still in flight must be cancelled */
 		rpc_set_resiliency(rpc, 0, rpc->timeout, 0);
 		maybe_call_connect_cb(rpc, RPC_STATUS_CANCEL);
@@ -2396,6 +2651,7 @@ rpc_disconnect(struct rpc_context *rpc, const char *error)
          * and completes that pdu itself.
          */
         rpc->state = READ_RM;
+        rpc->reading_call = 0;
         rpc->inpos = 0;
         rpc_free_all_fragments(rpc);
 
@@ -2422,23 +2678,28 @@ reconnect_cb_tls(struct rpc_context *rpc, int status,
 	/* Must be called only for TLS transport */
 	assert(rpc->use_tls);
 
-	/* Must be called only after TLS handshake completes/fails */
-	assert(rpc->tls_context.state == TLS_HANDSHAKE_COMPLETED ||
-	       rpc->tls_context.state == TLS_HANDSHAKE_FAILED);
+	/* Cancelled, or the connection is already gone: nothing to restart */
+	if (status == RPC_STATUS_CANCEL || !rpc->is_connected) {
+		return;
+	}
 
 	/*
-	 * If handshake failed, restart the entire TCP connection not just the handshake.
-	 * This will create a new connection and perform the handshake.
+	 * Never carry on in the clear. We may be inside the probe's own
+	 * completion or rpc_timeout_scan(), so do not requeue from here.
 	 */
-	if (rpc->tls_context.state == TLS_HANDSHAKE_FAILED) {
-		RPC_LOG(rpc, 1, "reconnect_cb_tls: TLS handshake failed, restarting connection!");
+	if (status != RPC_STATUS_SUCCESS ||
+	    rpc->tls_context.state != TLS_HANDSHAKE_COMPLETED) {
+		RPC_LOG(rpc, 1, "reconnect_cb_tls: TLS handshake failed (status %d, "
+			"state %d), restarting connection!",
+			status, rpc->tls_context.state);
 
-		if (rpc->fd != -1) {
+		rpc->is_connected = 0;
+		if (rpc_reconnect_failed(rpc, ECONNABORTED) != 0 &&
+		    rpc->fd != -1) {
+			/* Not retrying. Nothing may be sent on this socket. */
 			close(rpc->fd);
 			rpc->fd  = -1;
 		}
-		rpc->is_connected = 0;
-		rpc_reconnect_requeue(rpc);
 		return;
 	}
 
@@ -2467,6 +2728,15 @@ bind_conn_cb(struct rpc_context *rpc, int status, void *command_data,
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
 	if (status == RPC_STATUS_SUCCESS && res && res->status == NFS4_OK) {
+		int i;
+
+		for (i = 0; i < (int)res->resarray.resarray_len; i++) {
+			nfs_resop4 *op = &res->resarray.resarray_val[i];
+
+			if (op->resop == OP_BIND_CONN_TO_SESSION) {
+				rpc->nfs4_cb_up = !!(op->nfs_resop4_u.opbindconntosession.BIND_CONN_TO_SESSION4res_u.bctsr_resok4.bctsr_dir & CDFS4_BACK);
+			}
+		}
 		RPC_LOG(rpc, 2, "NFSv4 session rebound to the new connection");
 		return;
 	}
@@ -2493,6 +2763,7 @@ rpc_nfs4_rebind_session(struct rpc_context *rpc)
 	if (!rpc_nfs4_session_is_valid(rpc)) {
 		return;
 	}
+	rpc->nfs4_cb_up = 0;
 	if (rpc_nfs4_bind_conn_to_session_task(rpc, bind_conn_cb,
 					       NULL) != NULL) {
 		return;
@@ -2512,6 +2783,8 @@ reconnect_cb(struct rpc_context *rpc, int status, void *data,
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
+	if (status == RPC_STATUS_CANCEL)
+		return;
 	if (status != RPC_STATUS_SUCCESS) {
 		rpc_set_error(rpc, "Failed to reconnect async");
 		rpc_reconnect_requeue(rpc);
@@ -2558,6 +2831,80 @@ reconnect_cb(struct rpc_context *rpc, int status, void *data,
 #endif /* HAVE_NFS4_2 */
 }
 
+/* Preserve the registered descriptor without polling a failed socket. */
+static int
+rpc_park_reconnect_fd(struct rpc_context *rpc)
+{
+#if !defined(WIN32) && !defined(PS3_PPU) && !defined(PS2_EE)
+	int pipefd[2];
+	int fd = rpc_get_fd(rpc);
+	int flags = fcntl(fd, F_GETFD);
+
+	if (flags == -1) {
+		rpc_set_error(rpc, "Invalid reconnect descriptor: %s", strerror(errno));
+		return -1;
+	}
+	if (pipe(pipefd) != 0) {
+		rpc_set_error(rpc, "pipe() for reconnect delay failed: %s", strerror(errno));
+		return -1;
+	}
+	if (fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) == -1 ||
+	    dup2(pipefd[0], fd) == -1 || fcntl(fd, F_SETFD, flags) == -1) {
+		int error = errno;
+		close(pipefd[0]);
+		close(pipefd[1]);
+		rpc_set_error(rpc, "Failed to park reconnect descriptor: %s", strerror(error));
+		return -1;
+	}
+	close(pipefd[0]);
+	rpc->fd = rpc->old_fd = fd;
+	rpc->reconnect_write_fd = pipefd[1];
+#else
+	(void)rpc;
+#endif
+	return 0;
+}
+
+/* Retry only transport errors that can clear when the network returns.
+ * Setup errors (bad interface, credentials, allocation, etc.) remain fatal. */
+static int
+rpc_reconnect_failed(struct rpc_context *rpc, int error)
+{
+	int retryable = 0;
+	rpc->connect_cb = NULL;
+	switch (error) {
+#ifdef WIN32
+	case WSAENETDOWN: case WSAENETUNREACH: case WSAEHOSTUNREACH:
+	case WSAECONNREFUSED: case WSAECONNRESET: case WSAECONNABORTED:
+	case WSAETIMEDOUT:
+	case WSAEADDRNOTAVAIL:
+#else
+	case ENETDOWN: case ENETUNREACH: case EHOSTUNREACH:
+	case ECONNREFUSED: case ECONNRESET: case ECONNABORTED: case ETIMEDOUT:
+	case EADDRNOTAVAIL:
+#endif
+		retryable = 1;
+	}
+	if (retryable && rpc->auto_reconnect != 0 &&
+	    (rpc->auto_reconnect < 0 || rpc->num_retries > 0)) {
+		/* The RDMA epoll fd is already idle and stays registered */
+		if (!rpc_is_rdma(rpc) && rpc_park_reconnect_fd(rpc) != 0)
+			goto failed;
+		rpc->reconnect_due = rpc_current_time() + 1000;
+		RPC_LOG(rpc, 1, "Reconnect failed; retrying in 1000 ms: %s",
+			rpc_get_error(rpc));
+		return 0;
+	}
+ failed:
+	rpc->reconnect_due = 0;
+	if (rpc->reconnect_write_fd != -1) {
+		close(rpc->reconnect_write_fd);
+		rpc->reconnect_write_fd = -1;
+	}
+	rpc_error_all_pdus(rpc, "RPC ERROR: Failed to reconnect async");
+	return -1;
+}
+
 /* Disconnect but do not error all PDUs, just move pdus in-flight back to the
  * outqueue and reconnect.
  */
@@ -2571,19 +2918,32 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
 
 	if (rpc->auto_reconnect == 0) {
 		RPC_LOG(rpc, 1, "reconnect is disabled");
-		rpc_error_all_pdus(rpc, "RPC ERROR: Failed to reconnect async");
-		return -1;
+		rpc_fail_reading_pdu(rpc, RPC_STATUS_ERROR,
+				     "RPC ERROR: Failed to reconnect async");
+		return rpc_reconnect_failed(rpc, 0);
 	}
 
 	if (rpc->is_connected) {
 		rpc->num_retries = rpc->auto_reconnect;
 	}
 
-	if (rpc->fd != -1) {
-		rpc->old_fd = rpc->fd;
+#ifdef HAVE_RDMA
+	if (rpc->is_rdma) {
+		rpc_rdma_teardown(rpc);
+	} else
+#endif /* HAVE_RDMA */
+	{
+		if (rpc->fd != -1) {
+			rpc->old_fd = rpc->fd;
+		}
+		rpc->fd  = -1;
 	}
-	rpc->fd  = -1;
 	rpc->is_connected = 0;
+#ifdef HAVE_TLS
+	if (rpc->use_tls) {
+		tls_reset_context(rpc);
+	}
+#endif /* HAVE_TLS */
 
 	/*
 	 * The run of bytes written so far belongs to the socket we just
@@ -2599,6 +2959,7 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
 
 	rpc->inpos = 0;
 	rpc->state = READ_RM;
+	rpc->reading_call = 0;
 
         /*
          * Drop all fragments on reconnect
@@ -2614,6 +2975,19 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
                 nfs_mt_mutex_lock(&rpc->rpc_mutex);
         }
 #endif /* HAVE_MULTITHREADING */
+	/*
+	 * Replies to the server's back channel calls belong to the connection
+	 * the call came in on. The server sends the call again.
+	 */
+	for (pdu = rpc->outqueue.head; pdu; pdu = next) {
+		next = pdu->next;
+		if (pdu->discard_after_sending &&
+		    rpc_remove_pdu_from_queue(&rpc->outqueue, pdu)) {
+			rpc->stats.outqueue_len--;
+			rpc_free_pdu(rpc, pdu);
+		}
+	}
+
 	for (i = 0; i < rpc->num_hashes; i++) {
 		struct rpc_queue *q = &rpc->waitpdu[i];
 		for (pdu = q->head; pdu; pdu = next) {
@@ -2643,7 +3017,8 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
 #endif /* HAVE_MULTITHREADING */
 
 	if (rpc->auto_reconnect < 0 || rpc->num_retries > 0) {
-		rpc->num_retries--;
+		if (rpc->num_retries > 0)
+			rpc->num_retries--;
 		rpc->connect_cb  = reconnect_cb;
 		RPC_LOG(rpc, 1, "reconnect initiated to %s",
 			rpc->server ? rpc->server : "<last address>");
@@ -2653,10 +3028,7 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
 		 */
 		rpc->resolve_server = rpc->resolve_on_reconnect;
 		if (rpc_connect_sockaddr_async(rpc) != 0) {
-			rpc->connect_cb = NULL;
-			rpc_error_all_pdus(rpc, "RPC ERROR: Failed to "
-                                           "reconnect async");
-			return -1;
+			return rpc_reconnect_failed(rpc, rpc->connect_errno);
 		}
 		INC_STATS(rpc, num_reconnects);
 		return 0;
@@ -2718,6 +3090,24 @@ rpc_bind_udp(struct rpc_context *rpc, char *addr, int port)
 	return 0;
 }
 
+/*
+ * Some systems, such as macOS and the BSDs, reject an address length
+ * longer than the address family's own, so do not pass them
+ * sizeof(struct sockaddr_storage).
+ */
+socklen_t
+rpc_sockaddr_len(const struct sockaddr_storage *ss)
+{
+	switch (ss->ss_family) {
+#if !defined(PS3_PPU) && !defined(PS2_EE)
+	case AF_INET6:
+		return sizeof(struct sockaddr_in6);
+#endif
+	default:
+		return sizeof(struct sockaddr_in);
+	}
+}
+
 int
 rpc_set_udp_destination(struct rpc_context *rpc, char *addr, int port,
                         int is_broadcast)
@@ -2747,7 +3137,7 @@ rpc_set_udp_destination(struct rpc_context *rpc, char *addr, int port,
 	freeaddrinfo(ai);
 
         if (!is_broadcast) {
-                if (connect(rpc->fd, (struct sockaddr *)&rpc->udp_dest, sizeof(rpc->udp_dest)) != 0 && errno != EINPROGRESS) {
+                if (connect(rpc->fd, (struct sockaddr *)&rpc->udp_dest, rpc_sockaddr_len(&rpc->udp_dest)) != 0 && errno != EINPROGRESS) {
                         rpc_set_error(rpc, "connect() to UDP address failed. %s(%d)", strerror(errno), errno);
                         return -1;
                 }

@@ -357,6 +357,7 @@ struct rpc_context {
 	int fd;
         int socket_disabled; /* Do not allow read/write to the socket */
 	int old_fd;
+	int reconnect_write_fd; /* Keeps the parked reconnect pipe idle. */
 	/*
 	 * eventfd used to wake the multithreading service thread out of poll()
 	 * as soon as a PDU is queued, instead of waiting for the poll timeout.
@@ -370,6 +371,9 @@ struct rpc_context {
 	int is_nonblocking;
 
 	char *error_string;
+	uint64_t error_generation;
+	/* Set/read only by the RPC service owner; cleared by context destruction. */
+	uint32_t nfs40_state_error;
 
         uint32_t program;
         uint32_t version;
@@ -448,7 +452,10 @@ struct rpc_context {
 	uint32_t inbuf_size;
 	char *inbuf;
         enum input_state state;
-        uint32_t rm_xid[2]; /* array holding the record marker and the next 4 bytes */
+        /* record marker, xid, and msg_type when a back channel is enabled */
+        uint32_t rm_xid[3];
+        /* The record being read is a CALL from the server. */
+        int reading_call;
 	uint32_t pdu_size;  /* used in rpc_read_from_socket() */
 	char *buf;          /* used in rpc_read_from_socket() */
         struct rpc_pdu *pdu;
@@ -459,7 +466,7 @@ struct rpc_context {
 #ifdef HAVE_NFS4_2
 	/*
 	 * NFSv4 minor version stamped into every COMPOUND4args. 0 for
-	 * NFSv4.0, 2 for NFSv4.2. Unrelated to the RPC program version,
+	 * NFSv4.0, 1 for NFSv4.1, 2 for NFSv4.2. Unrelated to the RPC program version,
 	 * which is 4 for every NFSv4 minor version.
 	 */
 	uint32_t nfs4_minorversion;
@@ -488,6 +495,16 @@ struct rpc_context {
 	/* When the session next needs a SEQUENCE to keep its lease alive. */
 	uint64_t nfs4_renew_due;
 	int nfs4_session_valid;
+	/*
+	 * Back channel, see rpc_nfs4_enable_backchannel(). It has one slot,
+	 * and the last reply sent on it is kept for replays.
+	 */
+	rpc_nfs4_cb_fn nfs4_cb_fn;
+	void *nfs4_cb_private_data;
+	int nfs4_cb_up;
+	uint32_t nfs4_cb_seqid;
+	char *nfs4_cb_reply;
+	uint32_t nfs4_cb_reply_len;
 #ifdef HAVE_MULTITHREADING
 	/*
 	 * The slot table has a lock of its own rather than sharing rpc_mutex,
@@ -505,6 +522,8 @@ struct rpc_context {
 	struct sockaddr_storage s;
 	int auto_reconnect;
 	int num_retries;
+	uint64_t reconnect_due; /* Deferred transport retry, milliseconds. */
+	int connect_errno; /* Immediate connect error, not setup/resolver errors. */
 
 	/*
 	 * If true, reconnect will resolve 'server' afresh before reconnecting,
@@ -635,6 +654,19 @@ struct rpc_context {
 	struct tls_context tls_context;
 #endif /* HAVE_TLS */
 
+	/* Transport for the NFS program, MOUNT and PORTMAP always use TCP. */
+	enum rpc_transport wanted_transport;
+#ifdef HAVE_RDMA
+	int is_rdma;
+	/* Bumped by every teardown, so callers can tell the connection went away. */
+	uint32_t rdma_gen;
+	struct rpc_rdma *rdma;
+#ifdef HAVE_MULTITHREADING
+	/* Taken after rpc_mutex, never before it. */
+	libnfs_mutex_t rdma_mutex;
+#endif /* HAVE_MULTITHREADING */
+#endif /* HAVE_RDMA */
+
 #ifdef HAVE_LIBKRB5
         const char *username;
         enum rpc_sec wanted_sec;
@@ -672,6 +704,8 @@ struct rpc_pdu {
         ZDR zdr_in;
         int free_zdr;
         int free_pdu;
+        /* Set if a zero-copy READ has to complete with this error */
+        const char *zero_copy_error;
 
         /*
          * Queueing priority that can be passed to rpc_queue_pdu2().
@@ -682,6 +716,8 @@ struct rpc_pdu {
          */
         #define PDU_Q_PRIO_LOW  0
         #define PDU_Q_PRIO_HI   1
+        /* A reply to a back channel call, ahead of everything. */
+        #define PDU_Q_PRIO_REPLY 2
 
         /*
          * Is this a high priority pdu, i.e., was it queued with
@@ -777,6 +813,11 @@ rpc_cb cb;
 
         uint32_t discard_after_sending:1;
         uint32_t zero_copy_iov:1;
+
+#ifdef HAVE_RDMA
+        /* RPC-over-RDMA buffers and registrations while the call is in flight */
+        struct rpc_rdma_slot *rdma_slot;
+#endif /* HAVE_RDMA */
 
 #ifdef HAVE_NFS4_2
         /*
@@ -901,8 +942,39 @@ int rpc_queue_pdu2(struct rpc_context *rpc, struct rpc_pdu *pdu, int prio);
 void rpc_wakeup_service_thread(struct rpc_context *rpc);
 int rpc_process_pdu(struct rpc_context *rpc, char *buf, int size);
 struct rpc_pdu *rpc_find_pdu(struct rpc_context *rpc, uint32_t xid);
+struct rpc_pdu *rpc_find_reply_pdu(struct rpc_context *rpc, uint32_t xid);
 int rpc_cancel_sent_pdu(struct rpc_context *rpc, uint32_t xid);
 void rpc_error_all_pdus(struct rpc_context *rpc, const char *error);
+void rpc_fail_reading_pdu(struct rpc_context *rpc, int status, const char *error);
+int rpc_read_reply_ok(struct rpc_context *rpc, struct rpc_pdu *pdu);
+int rpc_outqueue_sent(struct rpc_context *rpc, struct rpc_pdu *pdu);
+void rpc_finished_pdu(struct rpc_context *rpc);
+
+#ifdef HAVE_RDMA
+enum rpc_rdma_event {
+        RPC_RDMA_EV_NONE = 0,
+        RPC_RDMA_EV_CONNECTED,
+        RPC_RDMA_EV_CONNECT_FAILED,
+        RPC_RDMA_EV_DISCONNECTED,
+};
+
+int rpc_rdma_connect(struct rpc_context *rpc);
+void rpc_rdma_teardown(struct rpc_context *rpc);
+enum rpc_rdma_event rpc_rdma_service(struct rpc_context *rpc, int *err);
+int rpc_rdma_write(struct rpc_context *rpc);
+void rpc_rdma_release_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu);
+
+static inline int rpc_is_rdma(struct rpc_context *rpc)
+{
+        return rpc->is_rdma;
+}
+#else
+static inline int rpc_is_rdma(struct rpc_context *rpc)
+{
+        (void)rpc;
+        return 0;
+}
+#endif /* HAVE_RDMA */
 
 /*
  * XXX This holds rpc->rpc_mutex, so if the caller is already holding
@@ -967,6 +1039,8 @@ void nfs_set_error_locked(struct nfs_context *nfs, char *error_string, ...)
 
 const char *nfs_get_server(struct nfs_context *nfs);
 const char *nfs_get_export(struct nfs_context *nfs);
+/* Explicit nfsport, else the RDMA default, else 0 */
+int nfs_nfsport(struct nfs_context *nfs);
 
 void rpc_set_interface(struct rpc_context *rpc, const char *ifname);
 
@@ -977,8 +1051,21 @@ void rpc_set_poll_timeout(struct rpc_context *rpc, int poll_timeout);
 int rpc_get_poll_timeout(struct rpc_context *rpc);
 int rpc_add_fragment(struct rpc_context *rpc, char *data, uint32_t size);
 void rpc_free_all_fragments(struct rpc_context *rpc);
+
+/* The length of the address in ss, for sendto() and connect() */
+socklen_t rpc_sockaddr_len(const struct sockaddr_storage *ss);
+
 uint64_t rpc_current_time(void);
 uint64_t rpc_current_time_us(void);
+
+/*
+ * Without a monotonic clock, rpc_current_time() falls back to time() and
+ * steps in whole seconds.
+ */
+#if !defined(HAVE_CLOCK_GETTIME) && !defined(HAVE_CLOCK_MONOTONIC) && !defined(WIN32)
+#define RPC_CLOCK_IN_SECONDS
+#endif
+
 #ifdef HAVE_CLOCK_GETTIME
 uint64_t rpc_wallclock_time(void);
 #endif
@@ -1074,6 +1161,30 @@ struct nfs_context {
 #endif /* HAVE_MULTITHREADING */
 };
 
+/*
+ * nfsi->version is NFS_V4_2 for both NFSv4.1 and NFSv4.2. Sessions are used by
+ * either; the 4.2-only operations need minor version 2.
+ */
+static inline int nfs_has_sessions(struct nfs_context *nfs)
+{
+#ifdef HAVE_NFS4_2
+        return nfs->nfsi->version == NFS_V4_2;
+#else
+        (void)nfs;
+        return 0;
+#endif
+}
+
+static inline int nfs_is_v4_2(struct nfs_context *nfs)
+{
+#ifdef HAVE_NFS4_2
+        return nfs_has_sessions(nfs) && nfs->rpc->nfs4_minorversion == 2;
+#else
+        (void)nfs;
+        return 0;
+#endif
+}
+
 #ifdef HAVE_MULTITHREADING
 struct nfs_thread_context {
         struct nfs_thread_context *next;
@@ -1168,6 +1279,9 @@ struct nfsfh {
 };
 
 void rpc_free_iovector(struct rpc_context *rpc, struct rpc_io_vectors *v);
+int rpc_sec_covers_payload(struct rpc_context *rpc);
+int rpc_zdr_put_payload(ZDR *zdr, const struct iovec *iov, int iovcnt,
+                        uint32_t len);
 int rpc_add_iovector(struct rpc_context *rpc, struct rpc_io_vectors *v,
                      char *buf, int len, void (*free)(void *));
 void rpc_advance_cursor(struct rpc_context *rpc, struct rpc_iovec_cursor *v,
@@ -1319,6 +1433,11 @@ void nfs4_requeue_delayed(struct rpc_context *rpc);
 int nfs4_session_has_free_slot(struct rpc_context *rpc);
 void nfs4_session_mutex_init(struct rpc_context *rpc);
 void nfs4_session_mutex_destroy(struct rpc_context *rpc);
+int nfs4_cb_process_call(struct rpc_context *rpc, char *buf, uint32_t size);
+int rpc_send_cb_reply(struct rpc_context *rpc, uint32_t xid,
+                      enum accept_stat stat, void *reply,
+                      zdrproc_t encode_fn, size_t alloc_hint);
+void nfs4_cb_reset(struct rpc_context *rpc);
 int nfs42_umount_async(struct nfs_context *nfs, nfs_cb cb, void *private_data);
 struct rpc_pdu *rpc_nfs4_bind_conn_to_session_task(struct rpc_context *rpc,
                                                    rpc_cb cb,
@@ -1397,6 +1516,7 @@ int _nfs_mount_async(struct nfs_context *nfs, const char *server,
 
 #ifdef HAVE_TLS
 int tls_global_init(struct rpc_context *rpc);
+void tls_reset_context(struct rpc_context *rpc);
 enum tls_handshake_state do_tls_handshake(struct rpc_context *rpc);
 #endif
 

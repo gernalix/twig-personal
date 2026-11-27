@@ -242,12 +242,19 @@ struct rpc_pdu *rpc_nfs3_access_task(struct rpc_context *rpc, rpc_cb cb,
 uint32_t
 zdr_READ3resok_zero_copy (ZDR *zdrs, READ3resok *objp)
 {
+        uint32_t pos;
+
         if (!zdr_post_op_attr (zdrs, &objp->file_attributes))
                 return FALSE;
         if (!zdr_count3 (zdrs, &objp->count))
                 return FALSE;
         if (!zdr_bool (zdrs, &objp->eof))
                 return FALSE;
+        /* Peek at the data length, the data itself goes to the caller's buffers */
+        pos = zdr_getpos(zdrs);
+        if (!zdr_uint32_t (zdrs, &objp->data.data_len))
+                return FALSE;
+        zdr_setpos(zdrs, pos);
 	return TRUE;
 }
 
@@ -397,6 +404,7 @@ struct rpc_pdu *rpc_nfs3_writev_task(struct rpc_context *rpc, rpc_cb cb,
         int start;
         static uint32_t zero_padding;
         uint32_t data_len;
+        int copy_payload;
 
         /*
          * If caller has a single contiguous buffer they can convey it
@@ -428,7 +436,19 @@ struct rpc_pdu *rpc_nfs3_writev_task(struct rpc_context *rpc, rpc_cb cb,
          * - Write length
          * - Padding (optional)
          */
-	pdu = rpc_allocate_pdu2(rpc, NFS_PROGRAM, NFS_V3, NFS3_WRITE, cb, private_data, (zdrproc_t)zdr_WRITE3res, sizeof(WRITE3res), 0, iovcnt + 5);
+        /* Calculate data length to encode in the RPC request */
+        if (iov) {
+                int i;
+                data_len = 0;
+                for (i = 0; i < iovcnt; i++) {
+                        data_len += iov[i].iov_len;
+                }
+        } else {
+                data_len = args->data.data_len;
+        }
+        copy_payload = rpc_sec_covers_payload(rpc);
+
+	pdu = rpc_allocate_pdu2(rpc, NFS_PROGRAM, NFS_V3, NFS3_WRITE, cb, private_data, (zdrproc_t)zdr_WRITE3res, sizeof(WRITE3res), copy_payload ? data_len + 8 : 0, iovcnt + 5);
 	if (pdu == NULL) {
 		rpc_set_error(rpc, "Out of memory. Failed to allocate pdu for NFS3/WRITE call");
 		return NULL;
@@ -442,22 +462,27 @@ struct rpc_pdu *rpc_nfs3_writev_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
+        if (copy_payload) {
+                struct iovec data;
+
+                if (!iov) {
+                        data.iov_base = args->data.data_val;
+                        data.iov_len = data_len;
+                }
+                if (rpc_zdr_put_payload(&pdu->zdr, iov ? iov : &data,
+                                        iov ? iovcnt : 1, data_len) < 0) {
+                        rpc_set_error(rpc, "ZDR error: Failed to encode WRITE3 data");
+                        rpc_free_pdu(rpc, pdu);
+                        return NULL;
+                }
+                goto queue;
+        }
+
         /* Add an iovector for the WRITE3 header */
         if (rpc_add_iovector(rpc, &pdu->out, &pdu->outdata.data[start + 4],
                              zdr_getpos(&pdu->zdr) - start, NULL) < 0) {
 		rpc_free_pdu(rpc, pdu);
 		return NULL;
-        }
-
-        /* Calculate data length to encode in the RPC request */
-        if (iov) {
-                int i;
-                data_len = 0;
-                for (i = 0; i < iovcnt; i++) {
-                        data_len += iov[i].iov_len;
-                }
-        } else {
-                data_len = args->data.data_len;
         }
 
         /* Add an iovector for the length of the byte/array blob */
@@ -497,6 +522,7 @@ struct rpc_pdu *rpc_nfs3_writev_task(struct rpc_context *rpc, rpc_cb cb,
                 }
         }
 
+ queue:
 	if (rpc_queue_pdu(rpc, pdu) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/WRITE call");
 		return NULL;

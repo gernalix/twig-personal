@@ -75,13 +75,27 @@
 
 static const char *oom = "out of memory";
 
+/*
+ * A monotonic clock: CLOCK_MONOTONIC_COARSE where there is one, else
+ * CLOCK_MONOTONIC, as on macOS, else GetTickCount64() on Windows. Only
+ * without any of them do we fall back to time(), in whole seconds, see
+ * RPC_CLOCK_IN_SECONDS.
+ */
+#if defined(HAVE_CLOCK_GETTIME)
+#define RPC_CLOCK CLOCK_MONOTONIC_COARSE
+#elif defined(HAVE_CLOCK_MONOTONIC)
+#define RPC_CLOCK CLOCK_MONOTONIC
+#endif
+
 uint64_t rpc_current_time(void)
 {
-#ifdef HAVE_CLOCK_GETTIME
+#if defined(RPC_CLOCK)
 	struct timespec tp;
 
-	clock_gettime(CLOCK_MONOTONIC_COARSE, &tp);
+	clock_gettime(RPC_CLOCK, &tp);
 	return (uint64_t)tp.tv_sec * 1000 + tp.tv_nsec / 1000000;
+#elif defined(WIN32)
+	return GetTickCount64();
 #else
 	return (uint64_t)time(NULL) * 1000;
 #endif
@@ -89,11 +103,13 @@ uint64_t rpc_current_time(void)
 
 uint64_t rpc_current_time_us(void)
 {
-#ifdef HAVE_CLOCK_GETTIME
+#if defined(RPC_CLOCK)
 	struct timespec tp;
 
-	clock_gettime(CLOCK_MONOTONIC_COARSE, &tp);
+	clock_gettime(RPC_CLOCK, &tp);
 	return (uint64_t)tp.tv_sec * 1000000 + tp.tv_nsec / 1000;
+#elif defined(WIN32)
+	return GetTickCount64() * 1000;
 #else
 	return (uint64_t)time(NULL) * 1000000;
 #endif
@@ -163,6 +179,9 @@ struct rpc_context *rpc_init_context(void)
 #ifdef HAVE_MULTITHREADING
 	nfs_mt_mutex_init(&rpc->rpc_mutex);
 	nfs_mt_mutex_init(&rpc->nfs40_renew_mutex);
+#ifdef HAVE_RDMA
+	nfs_mt_mutex_init(&rpc->rdma_mutex);
+#endif /* HAVE_RDMA */
 #ifdef HAVE_NFS4_2
 	nfs4_session_mutex_init(rpc);
 #endif /* HAVE_NFS4_2 */
@@ -202,6 +221,7 @@ struct rpc_context *rpc_init_context(void)
 	rpc->xid = salt + (uint32_t)rpc_current_time() + ((uint32_t)getpid() << 16);
 	salt += 0x01000000;
 	rpc->fd = -1;
+	rpc->reconnect_write_fd = -1;
 	rpc->tcp_syncnt = RPC_PARAM_UNDEFINED;
 #if defined(WIN32) || defined(ANDROID) || defined(PS3_PPU)
 	rpc->uid = 65534;
@@ -261,6 +281,7 @@ struct rpc_context *rpc_init_server_context(int s)
 
 	rpc->is_server_context = 1;
 	rpc->fd = s;
+	rpc->reconnect_write_fd = -1;
 	/*
 	 * Server contexts have no service thread to wake. Without this the
 	 * calloc() above would leave evfd at 0, i.e. stdin, and we would both
@@ -277,6 +298,9 @@ struct rpc_context *rpc_init_server_context(int s)
 #ifdef HAVE_MULTITHREADING
         nfs_mt_mutex_init(&rpc->rpc_mutex);
         nfs_mt_mutex_init(&rpc->nfs40_renew_mutex);
+#ifdef HAVE_RDMA
+        nfs_mt_mutex_init(&rpc->rdma_mutex);
+#endif /* HAVE_RDMA */
 #ifdef HAVE_NFS4_2
         nfs4_session_mutex_init(rpc);
 #endif /* HAVE_NFS4_2 */
@@ -392,6 +416,7 @@ void rpc_set_error(struct rpc_context *rpc, const char *error_string, ...)
                 nfs_mt_mutex_lock(&rpc->rpc_mutex);
         }
 #endif /* HAVE_MULTITHREADING */
+	rpc->error_generation++;
 	old_error_string = rpc->error_string;
         va_start(ap, error_string);
 	rpc->error_string = malloc(1024);
@@ -420,6 +445,8 @@ void rpc_set_error_locked(struct rpc_context *rpc, const char *error_string, ...
 {
 	va_list ap;
 	char *old_error_string = rpc->error_string;
+
+	rpc->error_generation++;
 
 	va_start(ap, error_string);
 	rpc->error_string = malloc(1024);
@@ -575,6 +602,21 @@ static void rpc_purge_all_pdus(struct rpc_context *rpc, int status, const char *
 	assert(!rpc->outqueue.head);
 }
 
+/* The reply being read is in no queue, so the purge does not see it. */
+void rpc_fail_reading_pdu(struct rpc_context *rpc, int status, const char *error)
+{
+	struct rpc_pdu *pdu = rpc->pdu;
+
+	if (pdu == NULL) {
+		return;
+	}
+	rpc->pdu = NULL;
+	if (pdu->cb) {
+		pdu->cb(rpc, status, (void *) error, pdu->private_data);
+	}
+	rpc_free_pdu(rpc, pdu);
+}
+
 void rpc_error_all_pdus(struct rpc_context *rpc, const char *error)
 {
 	rpc_purge_all_pdus(rpc, RPC_STATUS_ERROR, error);
@@ -630,6 +672,7 @@ void rpc_destroy_context(struct rpc_context *rpc)
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
 	rpc_nfs40_stop_renew(rpc);
+	rpc_fail_reading_pdu(rpc, RPC_STATUS_CANCEL, NULL);
 	rpc_purge_all_pdus(rpc, RPC_STATUS_CANCEL, NULL);
 	if (rpc->nfs40_renew_auth) {
 		auth_destroy(rpc->nfs40_renew_auth);
@@ -643,11 +686,25 @@ void rpc_destroy_context(struct rpc_context *rpc)
 
 	rpc_free_all_fragments(rpc);
 
+        while (rpc->endpoints) {
+                struct rpc_endpoint *next = rpc->endpoints->next;
+
+                free(rpc->endpoints);
+                rpc->endpoints = next;
+        }
+
         if (rpc->auth) {
                 auth_destroy(rpc->auth);
                 rpc->auth =NULL;
         }
 
+#ifdef HAVE_RDMA
+	rpc_rdma_teardown(rpc);
+#endif /* HAVE_RDMA */
+	if (rpc->reconnect_write_fd != -1)
+		close(rpc->reconnect_write_fd);
+	if (rpc->old_fd && rpc->old_fd != rpc->fd)
+		close(rpc->old_fd);
 	if (rpc->fd != -1) {
  		close(rpc->fd);
 	}
@@ -670,6 +727,9 @@ void rpc_destroy_context(struct rpc_context *rpc)
 #ifdef HAVE_MULTITHREADING
         nfs_mt_mutex_destroy(&rpc->rpc_mutex);
         nfs_mt_mutex_destroy(&rpc->nfs40_renew_mutex);
+#ifdef HAVE_RDMA
+        nfs_mt_mutex_destroy(&rpc->rdma_mutex);
+#endif /* HAVE_RDMA */
 #ifndef HAVE_STDATOMIC_H
         nfs_mt_mutex_destroy(&rpc->atomic_int_mutex);
 #endif
@@ -767,6 +827,12 @@ int rpc_get_poll_timeout(struct rpc_context *rpc)
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 	delay = rpc->poll_timeout;
+        if (rpc->reconnect_due) {
+                uint64_t now = rpc_current_time();
+                int retry_delay = rpc->reconnect_due > now ?
+                        (int)(rpc->reconnect_due - now) : 0;
+                return delay < 0 || retry_delay < delay ? retry_delay : delay;
+        }
 
 #ifdef HAVE_NFS4_2
 	session_delay = nfs4_next_delay_msecs(rpc);
@@ -860,6 +926,37 @@ int rpc_add_iovector(struct rpc_context *rpc, struct rpc_io_vectors *v,
         v->iov[v->niov].free = free;
         v->niov++;
 
+        return 0;
+}
+
+/* krb5i and krb5p sign or wrap the marshalled buffer, so payload can not be zero-copy */
+int rpc_sec_covers_payload(struct rpc_context *rpc)
+{
+#ifdef HAVE_LIBKRB5
+        return rpc->sec == RPC_SEC_KRB5I || rpc->sec == RPC_SEC_KRB5P;
+#else
+        (void)rpc;
+        return 0;
+#endif /* HAVE_LIBKRB5 */
+}
+
+/* Marshal iov[] as one opaque<>, length and XDR padding included */
+int rpc_zdr_put_payload(ZDR *zdr, const struct iovec *iov, int iovcnt,
+                        uint32_t len)
+{
+        int i;
+
+        if (!zdr_u_int(zdr, &len) ||
+            (uint32_t)(zdr->size - zdr->pos) < ((len + 3) & ~3U)) {
+                return -1;
+        }
+        for (i = 0; i < iovcnt; i++) {
+                memcpy(&zdr->buf[zdr->pos], iov[i].iov_base, iov[i].iov_len);
+                zdr->pos += iov[i].iov_len;
+        }
+        while (zdr->pos & 3) {
+                zdr->buf[zdr->pos++] = 0;
+        }
         return 0;
 }
 

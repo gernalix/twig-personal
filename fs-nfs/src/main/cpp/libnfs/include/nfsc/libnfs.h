@@ -60,6 +60,9 @@ extern "C" {
 #define LIBNFS_FEATURE_NFS4_2
 #endif
 
+/* nfs_set_transport() exists, it fails at run time on builds without RDMA. */
+#define LIBNFS_FEATURE_RDMA
+
 #define NFS_BLKSIZE 4096
 
 struct nfs_context;
@@ -126,8 +129,9 @@ struct utimbuf {
  * nfs_service() This function should be called once there are events triggered
  * for the filedescriptor. This function takes POLLIN/POLLOUT/POLLHUP/POLLERR
  * as arguments.
+ * On failure, nfs_get_error() contains the RPC service diagnostic.
  * This function returns 0 on success or -1 on error. If it returns -1 it
- * means that the socket is in an unrecoverable error state (disconnected?)
+ * means that the connection or NFS client state is unrecoverable
  * and that no further commands can be used.
  * When this happens the application should destroy the now errored context
  * re-create a new context and reconnect.
@@ -200,6 +204,22 @@ enum rpc_xprtsec {
 };
 
 EXTERN void nfs_set_xprtsecurity(struct nfs_context *nfs, enum rpc_xprtsec xprtsec);
+
+/*
+ * Transport for NFS, mapping to the mount option proto=[tcp,rdma].
+ * MOUNT and PORTMAP always use TCP. RDMA defaults the NFS port to 20049
+ * and can not be combined with xprtsec=tls/mtls.
+ */
+enum rpc_transport {
+	RPC_TRANSPORT_TCP = 0,
+	RPC_TRANSPORT_RDMA,
+};
+
+/*
+ * Returns 0 on success and -1 if the transport is not supported by this
+ * build of libnfs, see LIBNFS_FEATURE_RDMA.
+ */
+EXTERN int nfs_set_transport(struct nfs_context *nfs, enum rpc_transport transport);
 
 /*
  * Used if you need to bind to a specific interface.
@@ -284,6 +304,8 @@ EXTERN int nfs_set_hash_size(struct nfs_context *nfs, int hashes);
  *                     none : No TLS security.
  *                     tls  : TLS with server authentication only.
  *                     mtls : Mutual TLS, both server and client authentication.
+ * proto=<tcp|rdma>  : Transport for NFS. rdma uses RPC-over-RDMA and port
+ *                     20049 unless nfsport is given. Default is tcp.
  * auto-traverse-mounts=<0|1>
  *                   : Should libnfs try to traverse across nested mounts
  *                     automatically or not. Default is 1 == enabled.
@@ -412,12 +434,21 @@ EXTERN void nfs_set_readdir_max_buffer_size(struct nfs_context *nfs, uint32_t di
  * NFSv3 and NFSv4.0 have no sessions and are not affected by any of this.
  */
 #define NFS_V4_2 42
+/*
+ * NFSv4.1, i.e. NFSv4 minor version 1. It uses the same sessions as NFSv4.2,
+ * so everything said above about slots applies, but it can not use the calls
+ * that only NFSv4.2 defines (fallocate(), SEEK_HOLE and SEEK_DATA in lseek(),
+ * and so on). Those fail with -ENOTSUP.
+ */
+#define NFS_V4_1 41
 #endif /* LIBNFS_FEATURE_NFS4_2 */
 
 /*
  * Set NFS version. Supported versions are
  * NFS_V3 (default)
  * NFS_V4     NFSv4.0
+ * NFS_V4_1   NFSv4.1, where LIBNFS_FEATURE_NFS4_2 is defined and the library
+ *            was built with NFSv4.2 support
  * NFS_V4_2   NFSv4.2, where LIBNFS_FEATURE_NFS4_2 is defined and the library
  *            was built with NFSv4.2 support
  */
@@ -426,6 +457,8 @@ EXTERN int nfs_set_version(struct nfs_context *nfs, int version);
  * Get NFS version of a connected share. Supported versions are
  * NFS_V3
  * NFS_V4
+ * NFS_V4_1
+ * NFS_V4_2
  */
 EXTERN int nfs_get_version(struct nfs_context *nfs);
 
@@ -823,6 +856,12 @@ EXTERN int nfs_open2(struct nfs_context *nfs, const char *path, int flags,
 /*
  * Async close(nfsfh)
  *
+ * Consumes nfsfh on every return path, including submission failure. The
+ * caller must not reuse or retry closing the handle. A successfully queued
+ * close releases it when the command completes; submission failure releases
+ * it immediately. An error does not guarantee that server-side state was
+ * closed or that buffered writes were committed.
+ *
  * Function returns
  *  0 : The command was queued successfully. The callback will be invoked once
  *      the command completes.
@@ -839,6 +878,7 @@ EXTERN int nfs_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                            nfs_cb cb, void *private_data);
 /*
  * Sync close(nfsfh)
+ * Consumes nfsfh even on failure. The caller must not reuse or retry closing it.
  * Function returns
  *      0 : The operation was successful.
  * -errno : The command failed.

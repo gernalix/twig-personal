@@ -994,6 +994,17 @@ const OPEN4_SHARE_ACCESS_READ   = 0x00000001;
 const OPEN4_SHARE_ACCESS_WRITE  = 0x00000002;
 const OPEN4_SHARE_ACCESS_BOTH   = 0x00000003;
 
+const OPEN4_SHARE_ACCESS_WANT_DELEG_MASK        = 0xFF00;
+const OPEN4_SHARE_ACCESS_WANT_NO_PREFERENCE     = 0x0000;
+const OPEN4_SHARE_ACCESS_WANT_READ_DELEG        = 0x0100;
+const OPEN4_SHARE_ACCESS_WANT_WRITE_DELEG       = 0x0200;
+const OPEN4_SHARE_ACCESS_WANT_ANY_DELEG         = 0x0300;
+const OPEN4_SHARE_ACCESS_WANT_NO_DELEG          = 0x0400;
+const OPEN4_SHARE_ACCESS_WANT_CANCEL            = 0x0500;
+
+const OPEN4_SHARE_ACCESS_WANT_SIGNAL_DELEG_WHEN_RESRC_AVAIL = 0x10000;
+const OPEN4_SHARE_ACCESS_WANT_PUSH_DELEG_WHEN_UNCONTENDED   = 0x20000;
+
 const OPEN4_SHARE_DENY_NONE     = 0x00000000;
 const OPEN4_SHARE_DENY_READ     = 0x00000001;
 const OPEN4_SHARE_DENY_WRITE    = 0x00000002;
@@ -1002,7 +1013,8 @@ const OPEN4_SHARE_DENY_BOTH     = 0x00000003;
 enum open_delegation_type4 {
         OPEN_DELEGATE_NONE      = 0,
         OPEN_DELEGATE_READ      = 1,
-        OPEN_DELEGATE_WRITE     = 2
+        OPEN_DELEGATE_WRITE     = 2,
+        OPEN_DELEGATE_NONE_EXT  = 3
 };
 
 enum open_claim_type4 {
@@ -1122,6 +1134,28 @@ struct open_write_delegation4 {
                                            open. */
 };
 
+enum why_no_delegation4 {
+        WND4_NOT_WANTED                 = 0,
+        WND4_CONTENTION                 = 1,
+        WND4_RESOURCE                   = 2,
+        WND4_NOT_SUPP_FTYPE             = 3,
+        WND4_WRITE_DELEG_NOT_SUPP_FTYPE = 4,
+        WND4_NOT_SUPP_UPGRADE           = 5,
+        WND4_NOT_SUPP_DOWNGRADE         = 6,
+        WND4_CANCELLED                  = 7,
+        WND4_IS_DIR                     = 8
+};
+
+union open_none_delegation4
+switch (why_no_delegation4 ond_why) {
+        case WND4_CONTENTION:
+                bool ond_server_will_push_deleg;
+        case WND4_RESOURCE:
+                bool ond_server_will_signal_avail;
+        default:
+                void;
+};
+
 union open_delegation4
 switch (open_delegation_type4 delegation_type) {
         case OPEN_DELEGATE_NONE:
@@ -1130,6 +1164,8 @@ switch (open_delegation_type4 delegation_type) {
                 open_read_delegation4 read;
         case OPEN_DELEGATE_WRITE:
                 open_write_delegation4 write;
+        case OPEN_DELEGATE_NONE_EXT:
+                open_none_delegation4 od_whynone;
 };
 /*
  * Result flags
@@ -2162,10 +2198,15 @@ enum nfs_opnum4 {
         OP_RECLAIM_COMPLETE     = 58,
         /* NFSv4.2, RFC 7862 */
         OP_ALLOCATE             = 59,
+        OP_COPY                 = 60,
+        OP_COPY_NOTIFY          = 61,
         OP_DEALLOCATE           = 62,
+        OP_OFFLOAD_CANCEL       = 66,
+        OP_OFFLOAD_STATUS       = 67,
         OP_READ_PLUS            = 68,
         OP_SEEK                 = 69,
         OP_WRITE_SAME           = 70,
+        OP_CLONE                = 71,
         OP_ILLEGAL              = 10044
 };
 
@@ -2195,6 +2236,18 @@ struct DEALLOCATE4args {
 
 struct DEALLOCATE4res {
         nfsstat4        dr_status;
+};
+
+struct CLONE4args {
+        stateid4        cl_src_stateid;
+        stateid4        cl_dst_stateid;
+        offset4         cl_src_offset;
+        offset4         cl_dst_offset;
+        length4         cl_count;
+};
+
+struct CLONE4res {
+        nfsstat4        cl_status;
 };
 
 struct SEEK4args {
@@ -2282,6 +2335,95 @@ union WRITE_SAME4res switch (nfsstat4 wsr_status) {
          void;
 };
 
+struct netaddr4 {
+        string          na_r_netid<>;
+        string          na_r_addr<>;
+};
+
+enum netloc_type4 {
+        NL4_NAME        = 1,
+        NL4_URL         = 2,
+        NL4_NETADDR     = 3
+};
+
+union netloc4 switch (netloc_type4 nl_type) {
+ case NL4_NAME:         utf8str_cis     nl_name;
+ case NL4_URL:          utf8str_cis     nl_url;
+ case NL4_NETADDR:      netaddr4        nl_addr;
+};
+
+struct COPY4args {
+        stateid4        ca_src_stateid;
+        stateid4        ca_dst_stateid;
+        offset4         ca_src_offset;
+        offset4         ca_dst_offset;
+        length4         ca_count;
+        bool            ca_consecutive;
+        bool            ca_synchronous;
+        netloc4         ca_source_server<>;
+};
+
+struct copy_requirements4 {
+        bool            cr_consecutive;
+        bool            cr_synchronous;
+};
+
+struct COPY4resok {
+        write_response4         cr_response;
+        copy_requirements4      cr_requirements;
+};
+
+union COPY4res switch (nfsstat4 cr_status) {
+ case NFS4_OK:
+         COPY4resok             cr_resok4;
+ case NFS4ERR_OFFLOAD_NO_REQS:
+         copy_requirements4     cr_requirements;
+ default:
+         void;
+};
+
+struct COPY_NOTIFY4args {
+        stateid4        cna_src_stateid;
+        netloc4         cna_destination_server;
+};
+
+struct COPY_NOTIFY4resok {
+        nfstime4        cnr_lease_time;
+        stateid4        cnr_stateid;
+        netloc4         cnr_source_server<>;
+};
+
+union COPY_NOTIFY4res switch (nfsstat4 cnr_status) {
+ case NFS4_OK:
+         COPY_NOTIFY4resok      resok4;
+ default:
+         void;
+};
+
+struct OFFLOAD_CANCEL4args {
+        stateid4        oca_stateid;
+};
+
+struct OFFLOAD_CANCEL4res {
+        nfsstat4        ocr_status;
+};
+
+struct OFFLOAD_STATUS4args {
+        stateid4        osa_stateid;
+};
+
+struct OFFLOAD_STATUS4resok {
+        length4         osr_count;
+        nfsstat4        osr_complete<1>;
+};
+
+union OFFLOAD_STATUS4res switch (nfsstat4 osr_status) {
+ case NFS4_OK:
+         OFFLOAD_STATUS4resok   osr_resok4;
+ default:
+         void;
+};
+
 union nfs_argop4 switch (nfs_opnum4 argop) {
  case OP_ACCESS:        ACCESS4args opaccess;
  case OP_CLOSE:         CLOSE4args opclose;
@@ -2345,6 +2487,11 @@ union nfs_argop4 switch (nfs_opnum4 argop) {
  case OP_READ_PLUS:             READ_PLUS4args opreadplus;
  case OP_SEEK:                  SEEK4args opseek;
  case OP_WRITE_SAME:            WRITE_SAME4args opwritesame;
+ case OP_CLONE:                 CLONE4args opclone;
+ case OP_COPY:                  COPY4args opcopy;
+ case OP_COPY_NOTIFY:           COPY_NOTIFY4args opcopynotify;
+ case OP_OFFLOAD_CANCEL:        OFFLOAD_CANCEL4args opoffloadcancel;
+ case OP_OFFLOAD_STATUS:        OFFLOAD_STATUS4args opoffloadstatus;
  case OP_ILLEGAL:       void;
 };
 
@@ -2411,6 +2558,11 @@ union nfs_resop4 switch (nfs_opnum4 resop){
  case OP_READ_PLUS:             READ_PLUS4res opreadplus;
  case OP_SEEK:                  SEEK4res opseek;
  case OP_WRITE_SAME:            WRITE_SAME4res opwritesame;
+ case OP_CLONE:                 CLONE4res opclone;
+ case OP_COPY:                  COPY4res opcopy;
+ case OP_COPY_NOTIFY:           COPY_NOTIFY4res opcopynotify;
+ case OP_OFFLOAD_CANCEL:        OFFLOAD_CANCEL4res opoffloadcancel;
+ case OP_OFFLOAD_STATUS:        OFFLOAD_STATUS4res opoffloadstatus;
  case OP_ILLEGAL:       ILLEGAL4res opillegal;
 };
 
@@ -2479,6 +2631,106 @@ struct CB_RECALL4res {
 };
 
 /*
+ * CB_PUSH_DELEG: Offer Previously Requested Delegation to Client
+ */
+struct CB_PUSH_DELEG4args {
+        nfs_fh4          cpda_fh;
+        open_delegation4 cpda_delegation;
+};
+
+struct CB_PUSH_DELEG4res {
+        nfsstat4 cpdr_status;
+};
+
+/*
+ * CB_RECALL_ANY: Keep Any N Recallable Objects
+ */
+const RCA4_TYPE_MASK_RDATA_DLG          = 0;
+const RCA4_TYPE_MASK_WDATA_DLG          = 1;
+const RCA4_TYPE_MASK_DIR_DLG            = 2;
+const RCA4_TYPE_MASK_FILE_LAYOUT        = 3;
+const RCA4_TYPE_MASK_BLK_LAYOUT         = 4;
+const RCA4_TYPE_MASK_OBJ_LAYOUT_MIN     = 8;
+const RCA4_TYPE_MASK_OBJ_LAYOUT_MAX     = 9;
+const RCA4_TYPE_MASK_OTHER_LAYOUT_MIN   = 12;
+const RCA4_TYPE_MASK_OTHER_LAYOUT_MAX   = 15;
+
+struct CB_RECALL_ANY4args {
+        uint32_t        craa_objects_to_keep;
+        bitmap4         craa_type_mask;
+};
+
+struct CB_RECALL_ANY4res {
+        nfsstat4        crar_status;
+};
+
+/*
+ * CB_RECALLABLE_OBJ_AVAIL: Signal Resources for Recallable Objects
+ */
+typedef CB_RECALL_ANY4args CB_RECALLABLE_OBJ_AVAIL4args;
+
+struct CB_RECALLABLE_OBJ_AVAIL4res {
+        nfsstat4        croa_status;
+};
+
+/*
+ * CB_SEQUENCE: Supply Back Channel Sequencing and Control
+ */
+struct referring_call4 {
+        sequenceid4     rc_sequenceid;
+        slotid4         rc_slotid;
+};
+
+struct referring_call_list4 {
+        sessionid4      rcl_sessionid;
+        referring_call4 rcl_referring_calls<>;
+};
+
+struct CB_SEQUENCE4args {
+        sessionid4           csa_sessionid;
+        sequenceid4          csa_sequenceid;
+        slotid4              csa_slotid;
+        slotid4              csa_highest_slotid;
+        bool                 csa_cachethis;
+        referring_call_list4 csa_referring_call_lists<>;
+};
+
+struct CB_SEQUENCE4resok {
+        sessionid4      csr_sessionid;
+        sequenceid4     csr_sequenceid;
+        slotid4         csr_slotid;
+        slotid4         csr_highest_slotid;
+        slotid4         csr_target_highest_slotid;
+};
+
+union CB_SEQUENCE4res switch (nfsstat4 csr_status) {
+ case NFS4_OK:
+         CB_SEQUENCE4resok      csr_resok4;
+ default:
+         void;
+};
+
+/*
+ * CB_OFFLOAD: Report Results of an Asynchronous Operation, RFC 7862
+ */
+union offload_info4 switch (nfsstat4 coa_status) {
+ case NFS4_OK:
+         write_response4        coa_resok4;
+ default:
+         length4                coa_bytes_copied;
+};
+
+struct CB_OFFLOAD4args {
+        nfs_fh4         coa_fh;
+        stateid4        coa_stateid;
+        offload_info4   coa_offload_info;
+};
+
+struct CB_OFFLOAD4res {
+        nfsstat4        cor_status;
+};
+
+/*
  * CB_ILLEGAL: Response for illegal operation numbers
  */
 struct CB_ILLEGAL4res {
@@ -2491,18 +2743,35 @@ struct CB_ILLEGAL4res {
 enum nfs_cb_opnum4 {
         OP_CB_GETATTR           = 3,
         OP_CB_RECALL            = 4,
+        OP_CB_PUSH_DELEG        = 7,
+        OP_CB_RECALL_ANY        = 8,
+        OP_CB_RECALLABLE_OBJ_AVAIL = 9,
+        OP_CB_SEQUENCE          = 11,
+        OP_CB_OFFLOAD           = 15,
         OP_CB_ILLEGAL           = 10044
 };
 
 union nfs_cb_argop4 switch (unsigned argop) {
  case OP_CB_GETATTR:    CB_GETATTR4args opcbgetattr;
  case OP_CB_RECALL:     CB_RECALL4args  opcbrecall;
+ case OP_CB_PUSH_DELEG: CB_PUSH_DELEG4args opcbpush_deleg;
+ case OP_CB_RECALL_ANY: CB_RECALL_ANY4args opcbrecall_any;
+ case OP_CB_RECALLABLE_OBJ_AVAIL:
+                        CB_RECALLABLE_OBJ_AVAIL4args opcbrecallable_obj_avail;
+ case OP_CB_SEQUENCE:   CB_SEQUENCE4args opcbsequence;
+ case OP_CB_OFFLOAD:    CB_OFFLOAD4args opcboffload;
  case OP_CB_ILLEGAL:    void;
 };
 
 union nfs_cb_resop4 switch (unsigned resop){
  case OP_CB_GETATTR:    CB_GETATTR4res  opcbgetattr;
  case OP_CB_RECALL:     CB_RECALL4res   opcbrecall;
+ case OP_CB_PUSH_DELEG: CB_PUSH_DELEG4res opcbpush_deleg;
+ case OP_CB_RECALL_ANY: CB_RECALL_ANY4res opcbrecall_any;
+ case OP_CB_RECALLABLE_OBJ_AVAIL:
+                        CB_RECALLABLE_OBJ_AVAIL4res opcbrecallable_obj_avail;
+ case OP_CB_SEQUENCE:   CB_SEQUENCE4res opcbsequence;
+ case OP_CB_OFFLOAD:    CB_OFFLOAD4res  opcboffload;
  case OP_CB_ILLEGAL:    CB_ILLEGAL4res  opcbillegal;
 };
 

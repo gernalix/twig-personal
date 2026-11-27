@@ -146,6 +146,19 @@ check_nfs3_error(struct nfs_context *nfs, int status,
 	return 0;
 }
 
+static int
+nfs3_empty_fh(struct nfs_context *nfs, struct nfs_cb_data *data,
+              u_int len)
+{
+	if (len != 0) {
+		return 0;
+	}
+	nfs_set_error(nfs, "Server returned an empty filehandle.");
+	data->cb(-EIO, nfs, nfs_get_error(nfs), data->private_data);
+	free_nfs_cb_data(data);
+	return 1;
+}
+
 static int nfs3_lookup_path_async_internal(struct nfs_context *nfs,
                                            struct nfs_attr *attr,
                                            struct nfs_cb_data *data,
@@ -314,6 +327,9 @@ nfs3_lookup_path_1_cb(struct rpc_context *rpc, int status, void *command_data,
 	 */
         fh.val = res->LOOKUP3res_u.resok.object.data.data_val;
         fh.len = res->LOOKUP3res_u.resok.object.data.data_len;
+	if (nfs3_empty_fh(nfs, data, fh.len)) {
+		return;
+	}
 	nfs3_lookup_path_async_internal(nfs, &attr, data, &fh);
 }
 
@@ -836,6 +852,11 @@ nfs3_mount_4_cb(struct rpc_context *rpc, int status, void *command_data,
 		md_cb->error = mountstat3_to_errno(res->fhs_status);
 		goto finished;
 	}
+	if (res->mountres3_u.mountinfo.fhandle.fhandle3_len == 0) {
+		nfs_set_error(nfs, "Server returned an empty filehandle.");
+		md_cb->error = -EIO;
+		goto finished;
+	}
 
 	mnt = malloc(sizeof(*mnt));
 	if (mnt == NULL) {
@@ -884,9 +905,9 @@ finished:
 		return;
 	}
 
-        if (nfs->nfsi->nfsport) {
+        if (nfs_nfsport(nfs)) {
                 if (rpc_connect_port_async(nfs->rpc, nfs_get_server(nfs),
-                                           nfs->nfsi->nfsport,
+                                           nfs_nfsport(nfs),
                                            NFS_PROGRAM, NFS_V3,
                                            nfs3_mount_5_cb, data) != 0) {
                         nfs_set_error(nfs, "%s: %s", __FUNCTION__,
@@ -1005,9 +1026,9 @@ nfs3_mount_3_cb(struct rpc_context *rpc, int status, void *command_data,
 	 */
 	rpc_disconnect(rpc, "normal disconnect");
 
-        if (nfs->nfsi->nfsport) {
+        if (nfs_nfsport(nfs)) {
                 if (rpc_connect_port_async(nfs->rpc, nfs_get_server(nfs),
-                                           nfs->nfsi->nfsport,
+                                           nfs_nfsport(nfs),
                                            NFS_PROGRAM, NFS_V3,
                                            nfs3_mount_5_cb, data) != 0) {
                         nfs_set_error(nfs, "%s: %s", __FUNCTION__,
@@ -1059,6 +1080,10 @@ nfs3_mount_2_cb(struct rpc_context *rpc, int status, void *command_data,
 		return;
 	}
 
+	if (nfs3_empty_fh(nfs, data,
+	                  res->mountres3_u.mountinfo.fhandle.fhandle3_len)) {
+		return;
+	}
 	nfs->nfsi->rootfh.len = res->mountres3_u.mountinfo.fhandle.fhandle3_len;
 	nfs->nfsi->rootfh.val = malloc(nfs->nfsi->rootfh.len);
 	if (nfs->nfsi->rootfh.val == NULL) {
@@ -1085,9 +1110,9 @@ nfs3_mount_2_cb(struct rpc_context *rpc, int status, void *command_data,
 
 	rpc_disconnect(rpc, "normal disconnect");
 
-        if (nfs->nfsi->nfsport) {
+        if (nfs_nfsport(nfs)) {
                 if (rpc_connect_port_async(nfs->rpc, nfs_get_server(nfs),
-                                           nfs->nfsi->nfsport,
+                                           nfs_nfsport(nfs),
                                            NFS_PROGRAM, NFS_V3,
                                            nfs3_mount_5_cb, data) != 0) {
                         nfs_set_error(nfs, "%s: %s", __FUNCTION__,
@@ -3815,8 +3840,6 @@ nfs3_fsync_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
 	if (rpc_nfs3_commit_task(nfs->rpc, nfs3_fsync_cb, &args, data) == NULL) {
 		nfs_set_error(nfs, "RPC error: Failed to send COMMIT "
                               "call for %s", data->path);
-		data->cb(-ENOMEM, nfs, nfs_get_error(nfs),
-                         data->private_data);
 		free_nfs_cb_data(data);
 		return -1;
 	}
@@ -3854,6 +3877,15 @@ nfs3_getacl_cb(struct rpc_context *rpc, int status, void *command_data,
 	}
         memset(&acl, 0, sizeof(acl));
         resok = &res->GETACL3res_u.resok;
+        if (resok->ace_count > resok->ace.ace_len ||
+            resok->default_ace_count >
+            resok->default_ace.default_ace_len) {
+                nfs_set_error(nfs, "NFS: GETACL of %s returned more ACEs "
+                              "than it carried", data->saved_path);
+                data->cb(-EIO, nfs, nfs_get_error(nfs), data->private_data);
+                free_nfs_cb_data(data);
+                return;
+        }
         acl.ace_count = resok->ace_count;
         if (acl.ace_count) {
                 acl.ace = calloc(acl.ace_count, sizeof(struct nfsacl_ace));
@@ -4210,6 +4242,7 @@ nfs3_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
                  void *private_data)
 {
         struct nfs_cb_data *data;
+        int ret;
 
         if (!nfsfh->is_dirty) {
                 nfs_free_nfsfh(nfsfh);
@@ -4228,7 +4261,10 @@ nfs3_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
         data->cb = cb;
         data->private_data = private_data;
 
-        return nfs_fsync_async(nfs, nfsfh, nfs3_close_cb, data);
+        ret = nfs_fsync_async(nfs, nfsfh, nfs3_close_cb, data);
+        if (ret < 0)
+                free_nfs_cb_data(data);
+        return ret;
 }
 
 static void
@@ -4316,6 +4352,9 @@ nfs3_pwrite_mcb(struct rpc_context *rpc, int status, void *command_data,
 		} else  {
 			size_t count = res->WRITE3res_u.resok.count;
 
+			if (count > mdata->count) {
+				count = mdata->count;
+			}
 			if (count < mdata->count) {
 				if (count == 0) {
 					nfs_set_error(nfs, "NFS: Write failed. No bytes written!");
@@ -4521,7 +4560,7 @@ nfs3_pread_cb(struct rpc_context *rpc, int status, void *command_data,
 	struct nfs_cb_data *data = private_data;
 	struct nfs_context *nfs = data->nfs;
 	READ3res *res;
-	int count;
+	uint32_t count;
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
@@ -4540,13 +4579,12 @@ nfs3_pread_cb(struct rpc_context *rpc, int status, void *command_data,
 		return;
         }
 
-        count = (int)res->READ3res_u.resok.count;
-        if (data->update_pos) {
-                data->nfsfh->offset = data->offset + count;
-        }
-
+        count = res->READ3res_u.resok.data.data_len;
         if (count > rpc->pdu->requested_read_count) {
                 count = rpc->pdu->requested_read_count;
+        }
+        if (data->update_pos) {
+                data->nfsfh->offset = data->offset + count;
         }
 
 	data->cb(count, nfs, NULL, data->private_data);
@@ -4942,6 +4980,11 @@ nfs3_create_1_cb(struct rpc_context *rpc, int status, void *command_data,
 		data->cb(nfsstat3_to_errno(res->status), nfs,
                          nfs_get_error(nfs), data->private_data);
 		free_nfs_cb_data(data);
+		return;
+	}
+
+	if (nfs3_empty_fh(nfs, data,
+	                  res->CREATE3res_u.resok.obj.post_op_fh3_u.handle.data.data_len)) {
 		return;
 	}
 

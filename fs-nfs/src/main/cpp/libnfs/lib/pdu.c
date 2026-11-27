@@ -232,6 +232,16 @@ void rpc_return_to_outqueue(struct rpc_context *rpc, struct rpc_pdu *pdu)
          */
         pdu->out.num_done = 0;
         rpc_reset_cursor(rpc, &pdu->in);
+
+        /* Forget a zero-copy reply that was cut off */
+        if (pdu->free_zdr) {
+                zdr_destroy(&pdu->zdr);
+                pdu->free_zdr = 0;
+        }
+        pdu->free_pdu = 0;
+        pdu->zero_copy_error = NULL;
+        pdu->read_count = 0;
+        pdu->zdr_decode_buf = NULL;
 }
 
 /*
@@ -657,6 +667,12 @@ void rpc_free_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
         }
 #endif /* HAVE_NFS4_2 */
 
+#ifdef HAVE_RDMA
+        if (pdu->rdma_slot) {
+                rpc_rdma_release_pdu(rpc, pdu);
+        }
+#endif /* HAVE_RDMA */
+
 	if (pdu->zdr_decode_buf != NULL) {
 		zdr_free(pdu->zdr_decode_fn, pdu->zdr_decode_buf);
 	}
@@ -708,7 +724,7 @@ void pdu_set_timeout(struct rpc_context *rpc, struct rpc_pdu *pdu, uint64_t now_
 	 */
 	if (pdu->timeout == 0) {
 		pdu->timeout = now_msecs + rpc->timeout;
-#ifndef HAVE_CLOCK_GETTIME
+#ifdef RPC_CLOCK_IN_SECONDS
 		/* If we do not have GETTIME we fallback to time() which
 		 * has 1s granularity for its timestamps.
 		 * We thus need to bump the timeout by 1000ms
@@ -726,9 +742,9 @@ void pdu_set_timeout(struct rpc_context *rpc, struct rpc_pdu *pdu, uint64_t now_
          * timeout, depending on the value of rpc->retrans.
          */
 	if (pdu->major_timeout == 0) {
-		pdu->major_timeout = now_msecs + (rpc->timeout * rpc->retrans);
+		pdu->major_timeout = now_msecs + ((uint64_t)rpc->timeout * rpc->retrans);
 		pdu->timeout = now_msecs + rpc->timeout;
-#ifndef HAVE_CLOCK_GETTIME
+#ifdef RPC_CLOCK_IN_SECONDS
 		pdu->major_timeout += 1000;
 		pdu->timeout += 1000;
 #endif
@@ -771,7 +787,8 @@ int rpc_queue_pdu2(struct rpc_context *rpc, struct rpc_pdu *pdu, int prio)
         char *buf;
 #endif /* HAVE_LIBKRB5 */
 
-        assert(prio == PDU_Q_PRIO_LOW || prio == PDU_Q_PRIO_HI);
+        assert(prio == PDU_Q_PRIO_LOW || prio == PDU_Q_PRIO_HI ||
+               prio == PDU_Q_PRIO_REPLY);
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
@@ -908,7 +925,7 @@ int rpc_queue_pdu2(struct rpc_context *rpc, struct rpc_pdu *pdu, int prio)
         if (rpc->is_udp && rpc->is_server_context) {
                 if (sendto(rpc->fd, pdu->zdr.buf, size, MSG_DONTWAIT,
                            (struct sockaddr *)&rpc->udp_dest,
-                           sizeof(rpc->udp_dest)) < 0) {
+                           rpc_sockaddr_len(&rpc->udp_dest)) < 0) {
                         rpc_set_error(rpc, "Sendto failed with errno %s", strerror(errno));
                         rpc_free_pdu(rpc, pdu);
                         return -1;
@@ -953,7 +970,7 @@ int rpc_queue_pdu2(struct rpc_context *rpc, struct rpc_pdu *pdu, int prio)
                 if (rpc->is_broadcast || rpc->is_server_context) {
                         if (sendto(rpc->fd, pdu->zdr.buf, size, MSG_DONTWAIT,
                                    (struct sockaddr *)&rpc->udp_dest,
-                                   sizeof(rpc->udp_dest)) < 0) {
+                                   rpc_sockaddr_len(&rpc->udp_dest)) < 0) {
                                 rpc_set_error(rpc, "Sendto failed with errno %s", strerror(errno));
                                 rpc_remove_pdu_from_queue_unlocked(rpc, &rpc->waitpdu[hash], pdu);
                                 rpc_free_pdu(rpc, pdu);
@@ -1002,7 +1019,14 @@ int rpc_queue_pdu2(struct rpc_context *rpc, struct rpc_pdu *pdu, int prio)
         /* Fresh PDU being queued to outqueue, num_done must be 0 */
         assert(pdu->out.num_done == 0);
 
-        if (prio == PDU_Q_PRIO_HI) {
+        if (prio == PDU_Q_PRIO_REPLY) {
+                /*
+                 * The server may be holding the slots our COMPOUNDs wait
+                 * for until it has this reply, so nothing may queue ahead.
+                 */
+                pdu->is_high_prio = TRUE;
+                rpc_add_to_outqueue_head(rpc, pdu);
+        } else if (prio == PDU_Q_PRIO_HI) {
                 rpc_add_to_outqueue_highp(rpc, pdu);
         } else {
                 rpc_add_to_outqueue_lowp(rpc, pdu);
@@ -1030,6 +1054,23 @@ int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
         return rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_LOW);
 }
 
+/*
+ * A READ that failed has no data in its reply, only a status for the
+ * caller to see.
+ */
+int rpc_read_reply_ok(struct rpc_context *rpc, struct rpc_pdu *pdu)
+{
+        if (rpc->program == NFS_PROGRAM && rpc->version == NFS_V3) {
+                const READ3res *res = (READ3res *)(void *)pdu->zdr_decode_buf;
+                return res->status == NFS3_OK;
+        }
+        if (rpc->program == NFS4_PROGRAM && rpc->version == NFS_V4) {
+                const COMPOUND4res *res = (COMPOUND4res *)(void *)pdu->zdr_decode_buf;
+                return res->status == NFS4_OK;
+        }
+        return 1;
+}
+
 static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
 {
 	struct rpc_msg msg;
@@ -1046,12 +1087,15 @@ static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
 	msg.body.rbody.reply.areply.verf = libnfs_null_auth;
 	if (pdu->zdr_decode_bufsize > 0) {
 		pdu->zdr_decode_buf = (char *)pdu + PAD_TO_8_BYTES(sizeof(struct rpc_pdu));
+		/* zdr_bytes() copies into a buffer it finds already set */
+		memset(pdu->zdr_decode_buf, 0, pdu->zdr_decode_bufsize);
 	}
 	msg.body.rbody.reply.areply.reply_data.results.where = pdu->zdr_decode_buf;
 	msg.body.rbody.reply.areply.reply_data.results.proc  = pdu->zdr_decode_fn;
 #ifdef HAVE_LIBKRB5
         if (rpc->sec == RPC_SEC_KRB5I && pdu->gss_seqno > 0) {
                 msg.body.rbody.reply.areply.reply_data.results.krb5i = 1;
+                msg.body.rbody.reply.areply.verf.gss_context = rpc->gss_context;
         }
         if (rpc->sec == RPC_SEC_KRB5P && pdu->gss_seqno > 0) {
                 msg.body.rbody.reply.areply.reply_data.results.krb5p = 1;
@@ -1090,7 +1134,7 @@ static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
                  * the data and complete the PDU once completed.
                  */
 #ifdef HAVE_LIBKRB5
-                if (rpc->sec != RPC_SEC_KRB5P)
+                if (rpc->sec == RPC_SEC_UNDEFINED)
 #endif /* HAVE_LIBKRB5 */
                         if (pdu->in.base) {
                                 rpc->pdu->free_pdu = 1;
@@ -1127,6 +1171,20 @@ static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
 #endif /* HAVE_TLS */
 
 #ifdef HAVE_LIBKRB5
+                /*
+                 * Once the GSS context is up an accepted reply has to carry
+                 * an AUTH_GSS verifier, a MIC over the seq_num of our request.
+                 * It is what ties the reply to this call and to the context,
+                 * so a reply without one cannot be accepted.
+                 */
+                if (rpc->sec != RPC_SEC_UNDEFINED && pdu->gss_seqno > 0 &&
+                    msg.body.rbody.reply.areply.verf.oa_flavor != AUTH_GSS) {
+                        status = RPC_STATUS_ERROR;
+                        data = "Server sent a reply without an AUTH_GSS "
+                               "verifier";
+                        break;
+                }
+
                 /*
                  * The verifier flavor is chosen by the server, so on its own
                  * it says nothing about how this reply should be read. Only
@@ -1207,7 +1265,17 @@ static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
                                 }
                         }
                 }
-                if (pdu->zero_copy_iov && rpc->sec == RPC_SEC_KRB5P) {
+                /*
+                 * krb5 protects nothing past the verifier, so once that is
+                 * checked a READ can carry on as zero-copy.
+                 */
+                if (rpc->sec == RPC_SEC_KRB5 && pdu->in.base) {
+                        rpc->pdu->free_pdu = 1;
+                        break;
+                }
+                if (pdu->zero_copy_iov &&
+                    (rpc->sec == RPC_SEC_KRB5I || rpc->sec == RPC_SEC_KRB5P) &&
+                    rpc_read_reply_ok(rpc, pdu)) {
                         struct iovec *iov;
                         int num_iov, num, count;
 
@@ -1274,6 +1342,20 @@ static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
         }
 
         if (status != 0xffffffff) {
+#ifdef HAVE_LIBKRB5
+                /*
+                 * A krb5 zero-copy READ still has its data on the socket,
+                 * headed for the caller's buffers, so a failed verifier can
+                 * only be reported once that has been read.
+                 */
+                if (status == RPC_STATUS_ERROR && rpc->sec == RPC_SEC_KRB5 &&
+                    pdu->in.base &&
+                    msg.body.rbody.reply.areply.stat == SUCCESS) {
+                        pdu->zero_copy_error = data;
+                        pdu->free_pdu = 1;
+                        return 0;
+                }
+#endif /* HAVE_LIBKRB5 */
 #ifdef HAVE_NFS4_2
                 if (status == RPC_STATUS_SUCCESS && pdu->nfs4_delay_maxres &&
                     nfs4_pdu_retry_delay(rpc, pdu, data)) {
@@ -1344,6 +1426,35 @@ static int rpc_send_error_reply(struct rpc_context *rpc,
         return rpc_queue_pdu(rpc, pdu);
 }
 
+/* Reply to a call the server sent us on the back channel. */
+int rpc_send_cb_reply(struct rpc_context *rpc, uint32_t xid,
+                      enum accept_stat stat, void *reply,
+                      zdrproc_t encode_fn, size_t alloc_hint)
+{
+        struct rpc_pdu *pdu;
+        struct rpc_msg res;
+
+        memset(&res, 0, sizeof(struct rpc_msg));
+        res.xid                          = xid;
+        res.direction                    = REPLY;
+        res.body.rbody.stat              = MSG_ACCEPTED;
+        res.body.rbody.reply.areply.verf = libnfs_null_auth;
+        res.body.rbody.reply.areply.stat = stat;
+        if (stat == SUCCESS) {
+                res.body.rbody.reply.areply.reply_data.results.where = reply;
+                res.body.rbody.reply.areply.reply_data.results.proc  = encode_fn;
+        } else if (stat == PROG_MISMATCH) {
+                res.body.rbody.reply.areply.reply_data.mismatch_info.low  = 1;
+                res.body.rbody.reply.areply.reply_data.mismatch_info.high = 1;
+        }
+
+        pdu = rpc_allocate_reply_pdu(rpc, &res, alloc_hint);
+        if (pdu == NULL) {
+                return -1;
+        }
+        return rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_REPLY);
+}
+
 int rpc_send_reply(struct rpc_context *rpc,
                    struct rpc_msg *call,
                    void *reply,
@@ -1396,6 +1507,10 @@ static int rpc_process_call(struct rpc_context *rpc, ZDR *zdr)
 	if (zdr_callmsg(rpc, zdr, &c.call) == 0) {
 		rpc_set_error(rpc, "Failed to decode CALL message. %s",
                               rpc_get_error(rpc));
+                /* Never answer a reply, two servers would ping-pong. */
+                if (c.call.direction != CALL) {
+                        return 0;
+                }
                 return rpc_send_error_reply(rpc, &c.call, GARBAGE_ARGS, 0, 0);
         }
         for (endpoint = rpc->endpoints; endpoint; endpoint = endpoint->next) {
@@ -1431,6 +1546,10 @@ static int rpc_process_call(struct rpc_context *rpc, ZDR *zdr)
                 if (endpoint->procs[i].proc == c.call.body.cbody.proc) {
                         if (endpoint->procs[i].decode_buf_size) {
                                 c.call.body.cbody.args = zdr_malloc(zdr, endpoint->procs[i].decode_buf_size);
+                                if (c.call.body.cbody.args == NULL) {
+                                        rpc_set_error(rpc, "Out of memory: Failed to allocate call arguments");
+                                        return rpc_send_error_reply(rpc, &c.call, SYSTEM_ERR, 0, 0);
+                                }
                                 memset(c.call.body.cbody.args, 0, endpoint->procs[i].decode_buf_size);
                         }
                         if (!endpoint->procs[i].decode_fn(zdr, c.call.body.cbody.args)) {
@@ -1446,7 +1565,7 @@ static int rpc_process_call(struct rpc_context *rpc, ZDR *zdr)
 }
 
 static struct rpc_pdu *rpc_find_pdu_in(struct rpc_context *rpc, uint32_t xid,
-                                       int sent_only)
+                                       int sent_only, int probe_only)
 {
 	struct rpc_pdu *pdu, *prev_pdu;
 	struct rpc_queue *q;
@@ -1477,7 +1596,11 @@ static struct rpc_pdu *rpc_find_pdu_in(struct rpc_context *rpc, uint32_t xid,
 	q = &rpc->waitpdu[hash];
 	prev_pdu = NULL;
 	for (pdu=q->head; pdu; pdu=pdu->next) {
-		if (pdu->xid != xid) {
+		if (pdu->xid != xid
+#ifdef HAVE_TLS
+		    || (probe_only && !pdu->expect_starttls)
+#endif
+		    ) {
 			prev_pdu = pdu;
 			continue;
 		}
@@ -1557,7 +1680,19 @@ static struct rpc_pdu *rpc_find_pdu_in(struct rpc_context *rpc, uint32_t xid,
 
 struct rpc_pdu *rpc_find_pdu(struct rpc_context *rpc, uint32_t xid)
 {
-        return rpc_find_pdu_in(rpc, xid, 0);
+        return rpc_find_pdu_in(rpc, xid, 0, 0);
+}
+
+/* Until TLS is up the only reply we take is the one to the AUTH_TLS probe. */
+struct rpc_pdu *rpc_find_reply_pdu(struct rpc_context *rpc, uint32_t xid)
+{
+#ifdef HAVE_TLS
+        if (rpc->use_tls &&
+            rpc->tls_context.state != TLS_HANDSHAKE_COMPLETED) {
+                return rpc_find_pdu_in(rpc, xid, 1, 1);
+        }
+#endif /* HAVE_TLS */
+        return rpc_find_pdu_in(rpc, xid, 0, 0);
 }
 
 /* Unsent pdus are left alone: the outqueue head may be half written. */
@@ -1565,7 +1700,7 @@ int rpc_cancel_sent_pdu(struct rpc_context *rpc, uint32_t xid)
 {
         struct rpc_pdu *pdu;
 
-        pdu = rpc_find_pdu_in(rpc, xid, 1);
+        pdu = rpc_find_pdu_in(rpc, xid, 1, 0);
         if (pdu) {
                 rpc_free_pdu(rpc, pdu);
                 return 0;
@@ -1608,22 +1743,29 @@ int rpc_process_pdu(struct rpc_context *rpc, char *buf, int size)
 
 #ifdef HAVE_LIBKRB5
         /*
-         * For KRB5P and iovectors, i.e. NFS[34]READ we
+         * For KRB5I/KRB5P and iovectors, i.e. NFS[34]READ we
          * need to use a ZDR that hangs off the PDU so we can
          * access the ZDR and its buffers to manually copy
          * data into the iovectors.
          */
-        if (rpc->pdu->zero_copy_iov && rpc->sec == RPC_SEC_KRB5P) {
+        if (rpc->pdu->zero_copy_iov &&
+            (rpc->sec == RPC_SEC_KRB5I || rpc->sec == RPC_SEC_KRB5P)) {
                 zdr_destroy(&rpc->pdu->zdr);
                 zdrmem_create(&rpc->pdu->zdr, buf, size, ZDR_DECODE);
                 if (rpc_process_reply(rpc, &rpc->pdu->zdr) != 0) {
                         rpc_set_error(rpc, "rpc_procdess_reply failed (for krb5 read)");
                 }
-        } else
+                /*
+                 * rpc_process_reply() has completed this pdu. pdu->zdr
+                 * holds what the decode allocated and is freed with the
+                 * pdu, so it must not be overwritten below.
+                 */
+                return 0;
+        }
 #endif /* HAVE_LIBKRB5 */
-                if (rpc_process_reply(rpc, &zdr) != 0) {
-                        rpc_set_error(rpc, "rpc_procdess_reply failed");
-                }
+        if (rpc_process_reply(rpc, &zdr) != 0) {
+                rpc_set_error(rpc, "rpc_procdess_reply failed");
+        }
 
         /*
          * A zero-copy READ still has to hand its payload to the caller, so the
@@ -1635,7 +1777,8 @@ int rpc_process_pdu(struct rpc_context *rpc, char *buf, int size)
          * skipped, and the caller's buffer untouched while the callback still
          * reported success.
          */
-        if (rpc->pdu && rpc->pdu->in.base) {
+        /* Only a reply still pending in rpc_process_reply() has a payload. */
+        if (rpc->pdu && rpc->pdu->in.base && rpc->pdu->free_pdu) {
                 memcpy(&rpc->pdu->zdr, &zdr, sizeof(zdr));
                 rpc->pdu->free_zdr = 1;
         } else {
