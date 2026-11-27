@@ -346,6 +346,7 @@
         ":|classpath|true"
       ],
       "versions": {
+        "com.google.ai.edge.litert:litert-metadata": "1.4.2",
         "com.google.auto.value:auto-value-annotations": "1.11.1",
         "com.google.code.gson:gson": "2.15.0",
         "com.google.crypto.tink:tink": "1.24.0",
