@@ -208,6 +208,8 @@ android {
     }
 
     packaging {
+        // Bouncy Castle's provider, PKIX and utility jars carry the same license.
+        resources.pickFirsts += "META-INF/LICENSE.md"
         resources.excludes += setOf(
             "META-INF/*.kotlin_module",
             "DebugProbesKt.bin",
