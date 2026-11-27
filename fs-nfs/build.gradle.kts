@@ -23,7 +23,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
 }
 
 dependencies {
@@ -37,5 +36,11 @@ tasks.withType<Test>().configureEach {
     if (!System.getenv("TWIG_NFS_TEST_HOST").isNullOrBlank() || System.getenv("TWIG_NFS_FAULT_PROXY") == "true") {
         outputs.upToDateWhen { false }
         outputs.doNotCacheIf("NFS live tests depend on an external fixture") { true }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }

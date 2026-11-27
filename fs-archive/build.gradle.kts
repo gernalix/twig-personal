@@ -7,10 +7,6 @@ java {
     targetCompatibility = JavaVersion.VERSION_17
 }
 
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions.jvmTarget = "17"
-}
-
 dependencies {
     implementation(project(":core-fs"))
     // zip uses the JDK's built-in java.util.zip; 7z uses the pure-Java library below (no .so).
@@ -20,4 +16,10 @@ dependencies {
 
     testImplementation(project(":fs-local"))
     testImplementation("junit:junit:4.13.2")
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }

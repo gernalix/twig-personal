@@ -190,9 +190,6 @@ android {
         isCoreLibraryDesugaringEnabled = true // required by the jellyfin ffmpeg decoder
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
 
     // ★ AGP puts a "Dependency metadata" blob in the APK signing block by default —
     // an encrypted-for-Google inventory of the libraries used, meant for Play Console
@@ -304,4 +301,10 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core-ktx:1.6.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }

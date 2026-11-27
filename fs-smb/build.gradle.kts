@@ -35,9 +35,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
 }
 
 dependencies {
@@ -50,5 +47,11 @@ tasks.withType<Test>().configureEach {
     if (!System.getenv("TWIG_SMB1_TEST_HOST").isNullOrBlank()) {
         outputs.upToDateWhen { false }
         outputs.doNotCacheIf("SMB1 live tests depend on an external fixture") { true }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }

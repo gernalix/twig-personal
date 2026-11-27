@@ -7,10 +7,6 @@ java {
     targetCompatibility = JavaVersion.VERSION_17
 }
 
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions.jvmTarget = "17"
-}
-
 dependencies {
     implementation(project(":core-fs"))
     implementation(libs.commons.net) // pure-Java FTP, no .so
@@ -27,4 +23,10 @@ dependencies {
     testImplementation(libs.mockwebserver)  // WebDAV / Jellyfin mock server
     testImplementation("org.json:json:20260814")
     testImplementation("junit:junit:4.13.2")
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }
