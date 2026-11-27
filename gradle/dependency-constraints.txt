@@ -1,1 +1,4 @@
 # Verified minimum versions for resolvable application and test classpaths.
+implementation com.github.junrar:junrar:8.1.2
+implementation org.tukaani:xz:1.12
+testImplementation org.apache.ftpserver:ftpserver-core:1.2.1
