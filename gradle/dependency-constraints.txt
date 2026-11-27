@@ -27,6 +27,7 @@ implementation androidx.versionedparcelable:versionedparcelable:1.2.1
 implementation androidx.viewpager:viewpager:1.1.0
 implementation com.github.junrar:junrar:8.1.2
 implementation com.google.guava:failureaccess:1.0.3
+implementation com.hierynomus:asn-one:0.8.0
 implementation com.squareup.okio:okio:3.18.2
 implementation commons-codec:commons-codec:1.23.0
 implementation commons-io:commons-io:2.22.0
