@@ -739,7 +739,7 @@ flags:
 	/*
 	 * Call this in the end after all options are processed, as it uses
 	 * rpc->debug.
-	 */ 
+	 */
 	if (nfs->rpc->wanted_xprtsec == RPC_XPRTSEC_TLS ||
             nfs->rpc->wanted_xprtsec == RPC_XPRTSEC_MTLS) {
 		/* tls_global_init() MUST succeed for us to use TLS security */
@@ -1418,7 +1418,7 @@ rpc_connect_program_async(struct rpc_context *rpc, const char *server,
 
         rpc->program = 100001;
         rpc->version = 2;
-        
+
 	if (rpc_connect_async(rpc, server, 111, rpc_connect_program_1_cb,
                               data) != 0) {
 		rpc_set_error(rpc, "Failed to start connection. %s",
@@ -1513,6 +1513,61 @@ nfs_umount_async(struct nfs_context *nfs, nfs_cb cb, void *private_data)
                               __FUNCTION__, nfs->nfsi->version);
                 return -1;
         }
+}
+
+/* Map an absolute link target into the export and append rest */
+int
+nfs_absolute_link_path(struct nfs_context *nfs, const char *target,
+                       size_t target_len, const char *rest, char **path)
+{
+	const char *export = nfs_get_export(nfs);
+	size_t export_len = export ? strlen(export) : 0;
+	char *norm;
+
+	norm = malloc(target_len + 2);
+	if (norm == NULL) {
+		goto nomem;
+	}
+	memcpy(norm, target, target_len);
+	norm[target_len] = '\0';
+	if (nfs_normalize_path(nfs, norm) != 0) {
+		goto outside;
+	}
+	/* "/x/.." normalizes to "" */
+	if (norm[0] == '\0') {
+		strcpy(norm, "/");
+	}
+	target_len = strlen(norm);
+
+	/* An export of "/" contains every absolute target. */
+	while (export_len > 0 && export[export_len - 1] == '/') {
+		export_len--;
+	}
+	if (target_len < export_len ||
+	    strncmp(norm, export, export_len) != 0 ||
+	    (target_len > export_len && norm[export_len] != '/')) {
+		goto outside;
+	}
+	target = norm + export_len;
+	target_len -= export_len;
+
+	*path = malloc(target_len + strlen(rest) + 3);
+	if (*path == NULL) {
+		free(norm);
+		goto nomem;
+	}
+	sprintf(*path, "/%.*s/%s", (int)target_len, target, rest);
+	free(norm);
+	return 0;
+
+outside:
+	free(norm);
+	nfs_set_error(nfs, "Symbolic link points outside export");
+	return -ENOENT;
+nomem:
+	nfs_set_error(nfs, "Out of memory: failed to allocate path "
+		      "for symbolic link");
+	return -ENOMEM;
 }
 
 int
@@ -1841,7 +1896,7 @@ static void r_cb(int status, struct nfs_context *nfs,
         }
 }
 
-        
+
 static int
 _nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                void *buf, size_t count,  uint64_t offset,
@@ -1888,7 +1943,7 @@ _nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                                  rw_data->offset, r_cb, rw_data,
                                  rw_data->update_pos);
 }
-        
+
 int
 nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                void *buf, size_t count,  uint64_t offset,

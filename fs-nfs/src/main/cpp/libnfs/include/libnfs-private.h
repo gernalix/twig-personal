@@ -113,7 +113,7 @@ extern "C" {
 #define container_of(ptr, type, member) ({                      \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
         (type *)((char *)__mptr - offsetof(type,member));})
-        
+
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
@@ -417,7 +417,7 @@ struct rpc_context {
         uint32_t nfs4_delay_queue_len;
 #endif
 	struct sockaddr_storage udp_src;
-#ifdef __linux__        
+#ifdef __linux__
 	struct sockaddr_storage udp_dst; /* Which ip we received a UDP packet on */
 #endif
         uint32_t num_hashes;
@@ -694,7 +694,7 @@ struct rpc_context {
         rpc_log_cb log_cb;
         void *log_private_data;
 };
-        
+
 struct rpc_pdu {
 	struct rpc_pdu *next;
 
@@ -753,7 +753,7 @@ struct rpc_pdu {
                                         * Used to clamp long reads.
                                         */
 
-	
+
         /*
          * Was this PDU retransmitted?
          * libnfs lets its users know if a PDU that completed was retransmitted
@@ -1111,7 +1111,7 @@ struct nfs_context_internal {
        struct nfs_fh rootfh;
        size_t readmax;
        size_t writemax;
-       
+
        /*
 	* Resilency parameters, taken from mount parameters and saved here.
 	* Later these are pushed to the RPC layer by rpc_set_resiliency().
@@ -1295,6 +1295,9 @@ void rpc_reset_cursor(struct rpc_context *rpc, struct rpc_iovec_cursor *v);
 const struct nfs_fh *nfs_get_rootfh(struct nfs_context *nfs);
 
 int nfs_normalize_path(struct nfs_context *nfs, char *path);
+int nfs_absolute_link_path(struct nfs_context *nfs, const char *target,
+                           size_t target_len, const char *rest,
+                           char **path);
 void nfs_free_nfsdir(struct nfsdir *nfsdir);
 void nfs_free_nfsfh(struct nfsfh *nfsfh);
 
