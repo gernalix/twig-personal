@@ -1,19 +1,7 @@
-// Keep R8 explicit for reproducible builds. AGP 8.13.2 bundles this same version.
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-    }
-    dependencies {
-        classpath("com.android.tools:r8:8.13.19")
-    }
-}
-
 plugins {
-    id("com.android.application") version "8.13.2" apply false
-    id("com.android.library") version "8.13.2" apply false
-    id("org.jetbrains.kotlin.android") version "2.3.21" apply false
-    id("org.jetbrains.kotlin.jvm") version "2.3.21" apply false
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.android.library) apply false
+    alias(libs.plugins.kotlin.jvm) apply false
 }
 
 val dependencyMinimums = providers.fileContents(

@@ -6,6 +6,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.*
 import org.junit.Test
+import java.net.InetAddress
 import java.security.KeyStore
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
@@ -14,6 +15,8 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLPeerUnverifiedException
 
 class ServerTlsTest {
+    private val loopback = InetAddress.getByAddress("localhost", byteArrayOf(127, 0, 0, 1))
+
     private class Trust : CertificateTrust {
         val pins = mutableMapOf<String, String>()
         val prompts = mutableListOf<Pair<String, String?>>()
@@ -35,16 +38,22 @@ class ServerTlsTest {
         context.init(keys.keyManagers, null, null)
         return MockWebServer().apply {
             useHttps(context.socketFactory, false)
-            start()
+            start(loopback, 0)
         }
     }
 
     private fun fetch(server: MockWebServer, trust: CertificateTrust?): String {
-        val client = ServerTls.configure(OkHttpClient.Builder(), trust)
+        // The fixture listens on IPv4 only. Resolve the same socket address while
+        // keeping the localhost authority used by the certificate trust assertions.
+        val builder = OkHttpClient.Builder().dns { host ->
+            require(host == loopback.hostName)
+            listOf(loopback)
+        }
+        val client = ServerTls.configure(builder, trust)
             .readTimeout(2, TimeUnit.SECONDS).build()
         return try {
             client.newCall(Request.Builder().url(server.url("/")).header("Authorization", "secret").build())
-                .execute().use { it.body!!.string() }
+                .execute().use { it.body.string() }
         } finally {
             client.connectionPool.evictAll()
             client.dispatcher.executorService.shutdown()

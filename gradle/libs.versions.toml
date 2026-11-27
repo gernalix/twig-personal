@@ -1,7 +1,7 @@
 [versions]
-agp = "8.13.2"
-kotlin = "2.3.21"
-coreKtx = "1.18.0"
+agp = "9.5.3"
+kotlin = "2.4.21"
+coreKtx = "1.19.1"
 appcompat = "1.8.0"
 recyclerview = "1.4.0"
 constraintlayout = "2.2.2"
@@ -13,7 +13,7 @@ viewpager2 = "1.1.0"
 commonsNet = "3.13.0"
 ftpserver = "1.2.0"
 sshj = "0.41.2"
-okhttp = "4.12.1"
+okhttp = "5.5.1"
 sshd = "2.20.1"
 commonsCompress = "1.28.0"
 xz = "1.9"
@@ -50,5 +50,4 @@ shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

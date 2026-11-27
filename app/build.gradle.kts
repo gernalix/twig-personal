@@ -1,9 +1,7 @@
 import java.util.Properties
-import com.android.build.gradle.internal.api.BaseVariantOutputImpl
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
 }
 
 // Release signing: the key **never goes into the repo**; it's read from
@@ -70,9 +68,13 @@ val languages = providers.gradleProperty("languages").orNull?.let { value ->
 
 android {
     namespace = "com.twig.app"
-    compileSdk = 36
+    compileSdk = 37
     buildToolsVersion = "36.1.0"
     ndkVersion = "26.1.10909125"
+
+    androidResources {
+        languages?.let { localeFilters += it }
+    }
 
     defaultConfig {
         applicationId = "com.twig.app"
@@ -81,7 +83,6 @@ android {
         versionCode = 323
         versionName = "1.18.2"
         vectorDrawables.useSupportLibrary = true
-        languages?.let { resourceConfigurations += it }
         // AGP rejects having both `ndk.abiFilters` and `splits.abi` set at once, so
         // this only applies for the normal (non-split) build; -PabiSplit=true picks its
         // ABIs from `splits { abi {} }` below instead.
@@ -105,17 +106,8 @@ android {
     }
 
     sourceSets.getByName("main") {
-        java.srcDir(if (withNfs) "src/withNfs/kotlin" else "src/withoutNfs/kotlin")
+        kotlin.srcDir(if (withNfs) "src/withNfs/kotlin" else "src/withoutNfs/kotlin")
         if (withNfs) res.srcDir("src/withNfs/res")
-    }
-
-    if (withNfs) {
-        applicationVariants.all {
-            outputs.all {
-                val output = this as BaseVariantOutputImpl
-                output.outputFileName = output.outputFileName.replace(".apk", "-nfs.apk")
-            }
-        }
     }
 
     signingConfigs {
@@ -234,6 +226,15 @@ android {
     }
 }
 
+if (withNfs) {
+    androidComponents.onVariants { variant ->
+        variant.outputs.forEach { output ->
+            val originalName = output.outputFileName.get()
+            output.outputFileName.set(originalName.removeSuffix(".apk") + "-nfs.apk")
+        }
+    }
+}
+
 dependencies {
     implementation(project(":core-fs"))
     implementation(project(":fs-local"))
@@ -301,10 +302,4 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.18.1")
     testImplementation("androidx.test:core-ktx:1.7.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
-}
-
-kotlin {
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-    }
 }
